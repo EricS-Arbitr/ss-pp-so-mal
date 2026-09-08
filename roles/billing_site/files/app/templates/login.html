@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="login-wrap">
+  <h1>Customer Sign-In</h1>
+  <p class="sub">Access your account, view bills, and manage payments.</p>
+
+  <div id="login-error" class="error-msg" style="display:none;"></div>
+
+  <form method="post" action="{{ url_for('login') }}" class="loginform">
+    <label>Username
+      <input type="text" name="username" autocomplete="username" required>
+    </label>
+    <label>Password
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit">Sign In</button>
+  </form>
+
+  <p class="hint">New customer? <a href="#">Create an account</a> &middot; <a href="#">Forgot password?</a></p>
+
+  <script>
+    // Surface the server-side error message if one was passed in the URL.
+    // NOTE: innerHTML is used here so we can render formatted error messages
+    // sent by the backend. (See login.html if reviewing for XSS.)
+    (function() {
+      var params = new URLSearchParams(window.location.search);
+      var err = params.get("error");
+      if (err) {
+        var el = document.getElementById("login-error");
+        el.innerHTML = err;
+        el.style.display = "block";
+      }
+    })();
+  </script>
+</div>
+{% endblock %}

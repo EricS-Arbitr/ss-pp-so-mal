@@ -1,0 +1,36 @@
+ansible_host: "10.255.240.195"
+
+# SimSpace provisions: eth0 = first data-plane (shared with mgmt 10.255.240.195/20)
+network_interfaces:
+  - name: "eth0"                      # switch-2 transit to pp-internal-firewall (mgmt shares)
+    ipv4:
+      address: "172.16.0.17"
+      netmask: "255.255.255.252"
+      type: "ethernet"
+      ospf: true
+  - name: "eth1"                      # switch-1 transit to pp-external-firewall
+    ipv4:
+      address: "172.16.0.10"
+      netmask: "255.255.255.252"
+      type: "ethernet"
+      ospf: true
+
+static_route:
+  route: "0.0.0.0/0"
+  next_hop: "172.16.0.9"              # pp-external-firewall (default chain toward pp-isp-router/is-inet)
+
+# Routing role (post-2026-06-10 architectural shift):
+#   - OSPF area 0 (the IGP) on eth0 + eth1 — already enabled via the
+#     `ospf: true` flag on each interface above.
+#   - No iBGP. iBGP was removed because OSPF is the corp IGP.
+# The OT umbrella stays as a static back-stop because pp-ot-firewall is
+# the ESP boundary and doesn't speak OSPF.
+extra_static_routes:
+  - network: "192.168.0.0/16"
+    next_hop: "172.16.0.18"           # pp-internal-firewall
+    descr: "OT umbrella via pp-internal-firewall (ESP boundary back-stop)"
+
+# Tell the overlay's "Remove stale VyOS iBGP" play to wipe the legacy
+# `set protocols bgp ...` config that the customer vyos role pushed on
+# earlier deploys.
+remove_vyos_bgp: true

@@ -1,0 +1,74 @@
+---
+# =========================================================================
+# vyos_mirror/tunnel.yml — GRE tunnel via vyos_config (network_cli)
+#
+# ENCAPSULATION IS gretap, NOT gre, AND THE DIFFERENCE IS THE WHOLE MIRROR.
+#
+# `tc mirred` copies complete ETHERNET FRAMES. An L3 `gre` tunnel carries IP
+# only, so the kernel strips the L2 header and the sensor's tun0 presents
+# cooked-mode frames (DLT_LINUX_SLL). Suricata reads those natively -- which
+# is why alerting worked and hid this for 42 hours -- but Zeek's AF_PACKET
+# plugin expects Ethernet and cannot parse a single frame.
+#
+# Measured on so-sensor-corp equivalent, measured on airfield 2026-08-14, same interface, same traffic:
+#   zeek -i tun0              5390 pkts, 0.37% not processed, 583 conn records
+#   zeek -i af_packet::tun0    841 pkts,  100% NOT PROCESSED,   0 conn records
+# The running workers use af_packet::tun0, so Zeek produced 66 connection
+# records in its entire lifetime while 23.5M packets arrived.
+#
+# gretap carries the Ethernet frame end to end, so tun0 is DLT_EN10MB and
+# SO keeps its intended af_packet + lb_procs fanout path. Fixing it here
+# rather than overriding SO's salt-rendered node.cfg is the same principle as
+# not patching soc.json: make the environment match what SO expects.
+# =========================================================================
+# Runs under `connection: network_cli` in the calling play. Modules used
+# here (vyos_config, vyos_command) require network_cli; they can't be
+# mixed with ansible.builtin.* module calls in the same connection (see
+# tc.yml which is invoked from a separate play).
+
+- name: Configure GRE tunnel {{ vyos_gre_tunnel_iface }} -> so-sensor-1
+  vyos.vyos.vyos_config:
+    lines:
+      - "set interfaces tunnel {{ vyos_gre_tunnel_iface }} encapsulation gretap"
+      - "set interfaces tunnel {{ vyos_gre_tunnel_iface }} source-address {{ vyos_gre_source_ip }}"
+      - "set interfaces tunnel {{ vyos_gre_tunnel_iface }} remote {{ vyos_gre_remote_ip }}"
+      - "set interfaces tunnel {{ vyos_gre_tunnel_iface }} address {{ vyos_gre_local_addr }}/{{ vyos_gre_tunnel_prefix }}"
+      - "set interfaces tunnel {{ vyos_gre_tunnel_iface }} description 'so-mirror to sensor'"
+      - "set interfaces tunnel {{ vyos_gre_tunnel_iface }} mtu {{ vyos_mirror_tunnel_mtu }}"
+    save: yes
+
+# CLAMP TCP MSS SO MIRRORED FRAMES FIT THE TUNNEL.
+# Full rationale, and the two approaches that were measured to fail, are in
+# defaults/main.yml under vyos_mirror_adjust_mss. Short version: `tc mirred`
+# copies whole Ethernet frames, a full-size one needs 1538 bytes of underlay
+# after GRE encapsulation, the underlay is 1500, and gretap drops rather than
+# fragments. Without this the sensor sees control packets and never a file.
+#
+# THIS TASK MUST RUN BEFORE tc.yml, AND THAT IS NOT COSMETIC.
+# Reconfiguring an interface flushes its ingress qdisc, taking the tc mirror
+# filters with it. Applying this clamp to a running range wiped the mirror on
+# both source interfaces (verified: `tc filter show dev ethN ingress` went to
+# zero mirred rules) and the next test measured a mirror that was not there.
+# tunnel.yml runs in play A and tc.yml in play B of 20-vyos.yml, so a normal
+# deploy re-applies tc afterwards and is safe. Any hand-edit that moves this
+# after the tc step silently disables mirroring.
+- name: Clamp TCP MSS on each mirrored interface
+  vyos.vyos.vyos_config:
+    lines:
+      - "set interfaces ethernet {{ item }} ip adjust-mss {{ vyos_mirror_adjust_mss }}"
+    save: yes
+  loop: "{{ vyos_mirror_source_interfaces }}"
+
+# `run` prefix is ONLY valid in configure mode; at the op-mode prompt
+# vyos_command uses, it's an invalid command. Just call the op-mode
+# command directly.
+- name: Verify GRE tunnel is present in VyOS interface list
+  vyos.vyos.vyos_command:
+    commands:
+      - "show interfaces tunnel {{ vyos_gre_tunnel_iface }}"
+  register: gre_status
+  changed_when: false
+
+- name: Report GRE tunnel state
+  ansible.builtin.debug:
+    msg: "{{ gre_status.stdout_lines[0][:5] }}"

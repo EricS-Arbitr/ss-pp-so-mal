@@ -1,0 +1,30 @@
+---
+# Windows 10 workstation images ship a DIFFERENT local account than the server
+# images, as of the 2026-08-26 blueprint refresh in this repo. Membership verified
+# against WORK_DIR/ARB_PP_DO_001.yml the same day.
+#
+# Child-group vars override parent-group vars, so these three beat the
+# simspace baseline in group_vars/windows.yml for exactly the 23 hosts in
+# [win10] and nothing else. The servers keep simspace / vault_windows_password.
+#
+# NOTE THE DIFFERENCE FROM ss-pp-ab, which carries the same credential split
+# but writes the password in plaintext because that repo has no vault. THIS
+# repo vaults its credentials -- vault_windows_password already lives in
+# group_vars/all/vault.yml -- so the workstation password goes there too.
+# One plaintext credential sitting beside vaulted ones is how the convention
+# rots, and `git log -p` would then carry it forever.
+#
+# THE COST OF GETTING THIS WRONG IS NOT AN ERROR, IT IS A DELAY. The Init play
+# is `hosts: windows`, `any_errors_fatal: true`, and roles/init uses
+# wait_for_connection with init_wait_timeout: 900. wait_for_connection retries
+# on ANY failure including rejected credentials, and emits no per-host output
+# until every host finishes -- so a wrong password is indistinguishable from a
+# host that has not booted, burns the full 900s, and takes all 45 Windows
+# hosts down with it.
+#
+# There is deliberately NO `| default(...)` on the password. An undefined
+# vault variable fails loudly on the first task; a defaulted one would supply
+# a wrong password and reproduce exactly the 900s silent hang described above.
+ansible_user: xadmin
+ansible_password: "{{ vault_win_workstation_password }}"
+ansible_become_user: xadmin

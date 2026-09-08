@@ -1,0 +1,69 @@
+---
+# =========================================================================
+# 20-vyos.yml — router-0 GRE tunnel + tc mirror rules to sensor
+# =========================================================================
+# TWO plays because VyOS orchestration mixes two connection profiles:
+#
+#   Play 1 (network_cli): vyos.vyos.vyos_config for declarative tunnel
+#                         setup. network_cli intercepts everything and
+#                         cannot run ansible.builtin.* modules.
+#   Play 2 (ssh):         ansible.builtin.template + command to write
+#                         and run the tc-mirror shell script. Uses the
+#                         underlying VyOS Debian shell + Python3.
+#
+# Both plays reference the SAME vyos_mirror role via `tasks_from:` so
+# task ordering + variable resolution stay together in one role.
+# =========================================================================
+
+- name: VyOS mirror config on router-0 — Part A (GRE tunnel via network_cli)
+  # so-ansible mirrors from a single router group [net_vyos]. Here the
+  # mirror sources are their own group: pp-corp-router, pp-ot-router and
+  # pp-isp-router. Deliberately NOT [vyos] — pp-ot-router is excluded from
+  # that group (its RC_NG_OT_Router image rejects the vyos role's interface
+  # commands) but IS a mirror source.
+  hosts: so_mirror_routers
+  gather_facts: false
+  connection: network_cli
+  tasks:
+    - name: Include tunnel tasks
+      ansible.builtin.import_role:
+        name: vyos_mirror
+        tasks_from: tunnel
+  tags:
+    - so
+    - so_mirror_routers
+- name: VyOS mirror config on router-0 — Part B (tc script via ssh)
+  # so-ansible mirrors from a single router group [net_vyos]. Here the
+  # mirror sources are their own group: pp-corp-router, pp-ot-router and
+  # pp-isp-router. Deliberately NOT [vyos] — pp-ot-router is excluded from
+  # that group (its RC_NG_OT_Router image rejects the vyos role's interface
+  # commands) but IS a mirror source.
+  hosts: so_mirror_routers
+  gather_facts: false
+  vars:
+    # ansible_connection MUST be set as a play VAR, not via the play's
+    # `connection:` keyword.
+    #
+    # An ansible_connection variable from inventory outranks the play
+    # keyword, and BOTH [vyos] (customer repo) and [vyos_routes_only] set
+    # `ansible_connection: ansible.netcommon.network_cli`. With the keyword
+    # form, this play silently kept network_cli and its shell/file tasks
+    # executed on the CONTROLLER instead of the routers — all three hosts
+    # reported the controller's own `ip link show` (identical MACs, eth0/
+    # eth1/docker0) and aborted on "tun0 not present" (2026-08-03).
+    #
+    # Play vars beat inventory group_vars and host_vars, so this form wins.
+    # so-ansible's dev range never hit it: [net_vyos] had no group_vars
+    # setting ansible_connection at all.
+    ansible_connection: ssh
+    # SSH into VyOS's underlying Debian; explicit interpreter because
+    # VyOS's /usr/bin/python doesn't always exist.
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Include tc tasks
+      ansible.builtin.import_role:
+        name: vyos_mirror
+        tasks_from: tc
+  tags:
+    - so
+    - so_mirror_routers

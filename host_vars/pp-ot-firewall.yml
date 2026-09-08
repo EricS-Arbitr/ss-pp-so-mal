@@ -1,0 +1,100 @@
+ansible_host: "10.255.240.190"
+
+# pfSense 2.8.1 on the new SimSpace pfSense image. NIC ordering (image
+# default):
+#   vmx0 → mgmt (DHCP from SimSpace platform, becomes 10.255.240.190/20)
+#   vmx1 → WAN  (DHCP default, reconfigured static by pfsense_interface)
+#   vmx2+ → additional interfaces, all static via pfsense_interface
+#
+# This box is the OT-side transit firewall — the ESP (Electronic Security
+# Perimeter, NERC CIP-005) boundary between corp IT and the OT enclave.
+# Per the utility-realistic routing design:
+#   - NO dynamic routing protocol crosses this boundary (no BGP, no OSPF).
+#   - Static routes only: default toward corp via pp-internal-router, and
+#     the three OT downstream prefixes via pp-ot-router.
+#   - FRR is therefore NOT used on this host. The role detects "no protocol
+#     declared" and skips/cleans up FRR.
+
+pfsense_hostname: "pp-ot-firewall"
+pfsense_domain: "voltgrid.com"
+
+pfsense_interfaces:
+  - descr: "WAN_INTERNAL"        # vmx1 — switch-4 transit to pp-internal-router
+    interface: vmx1
+    enable: true
+    ipv4_type: static
+    ipv4_address: "172.16.0.50"
+    ipv4_prefixlen: 30
+    blockpriv: false
+    blockbogons: false
+
+  - descr: "OT_TRANSIT"          # vmx2 — switch-8 transit to pp-ot-router
+    interface: vmx2
+    enable: true
+    ipv4_type: static
+    ipv4_address: "192.168.200.201"
+    ipv4_prefixlen: 30
+
+  - descr: "OT_DMZ"              # vmx3 — PP-OT-DMZ subnet gateway
+    interface: vmx3
+    enable: true
+    ipv4_type: static
+    ipv4_address: "192.168.90.129"
+    ipv4_prefixlen: 27
+
+pfsense_default_gw_name: "GW_INTERNAL"
+
+pfsense_gateways:
+  - name: "GW_INTERNAL"
+    interface: "WAN_INTERNAL"
+    gateway: "172.16.0.49"       # pp-internal-router
+  - name: "GW_OT_ROUTER"
+    interface: "OT_TRANSIT"
+    gateway: "192.168.200.202"   # pp-ot-router
+
+# OT prefixes behind pp-ot-router. These are pfSense kernel statics; the
+# corp side (pp-internal-router) has a matching `extra_static_routes`
+# entry for 192.168.0.0/16 → 172.16.0.50 so reverse traffic finds its way.
+#
+# We also declare an explicit 0.0.0.0/0 static here. pfSense's gateway-pin
+# (via defaultgw4 + system_routing_configure()) is unreliable for installing
+# the default route into the kernel on this image — repeatedly observed
+# missing after deploys. Belt-and-suspenders: the static below is an
+# unconditional kernel route via pfsense_route.
+pfsense_routes:
+  - network: "0.0.0.0/0"
+    gateway: "GW_INTERNAL"
+    descr: "Default toward corp via pp-internal-router (explicit, defaultgw4 unreliable)"
+  - network: "192.168.95.0/24"
+    gateway: "GW_OT_ROUTER"
+    descr: "OT Gas-Turbine via pp-ot-router"
+  - network: "192.168.90.0/27"
+    gateway: "GW_OT_ROUTER"
+    descr: "OT Gas-Turbine-Sim via pp-ot-router"
+  - network: "192.168.90.96/27"
+    gateway: "GW_OT_ROUTER"
+    descr: "OT PP-OT-Services via pp-ot-router"
+  - network: "192.168.100.0/24"
+    gateway: "GW_OT_ROUTER"
+    descr: "OT control subnet (pp-dc03 + pp-dcs-ctrl + pp-ctl-wks-01..04) via pp-ot-router"
+
+pfsense_rules:
+  # Security Onion GRE mirror: pp-ot-router -> so-sensor-ot.
+  # Currently REDUNDANT — the lab-mode permit-any rule on OT_TRANSIT already
+  # passes proto 47. Stated explicitly so the dependency is visible in config
+  # and survives tightening; without GRE the sensor shows a healthy tunnel and
+  # zero received packets, which is a genuinely slow thing to diagnose.
+  - name: "Allow GRE mirror pp-ot-router -> so-sensor-ot"
+    interface: "OT_TRANSIT"
+    protocol: "gre"
+    source: "192.168.200.202"
+    destination: "172.16.9.41"
+  - name: "Allow any on WAN_INTERNAL (lab)"
+    interface: "WAN_INTERNAL"
+  - name: "Allow any on OT_TRANSIT (lab)"
+    interface: "OT_TRANSIT"
+  - name: "Allow any on OT_DMZ (lab)"
+    interface: "OT_DMZ"
+
+# No pfsense_bgp, no pfsense_ospf. Intentional: this is the ESP boundary.
+# A NERC CIP audit expects static routing only across this perimeter.

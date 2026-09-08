@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Pay your bill</h1>
+
+{% if not unpaid %}
+  <p>You have no unpaid bills. Thank you for staying current!</p>
+{% else %}
+  <p class="sub">Select an outstanding bill to pay.</p>
+  {% for b in unpaid %}
+    <form method="post" action="{{ url_for('pay') }}" class="payform">
+      <input type="hidden" name="bill_id" value="{{ b['id'] }}">
+      <div class="payrow">
+        <div>
+          <strong>{{ b['period_start'] }} &mdash; {{ b['period_end'] }}</strong>
+          <div class="sub">Due {{ b['due_date'] }}</div>
+        </div>
+        <div class="amt">${{ '%.2f' | format(b['amount_due']) }}</div>
+        <button type="submit">Pay ${{ '%.2f' | format(b['amount_due']) }}</button>
+      </div>
+    </form>
+  {% endfor %}
+{% endif %}
+{% endblock %}

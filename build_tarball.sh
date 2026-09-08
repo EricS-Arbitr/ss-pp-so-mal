@@ -1,0 +1,366 @@
+#!/usr/bin/env bash
+#
+# Build ab_pp.tgz for deployment.
+#
+# Auto-discovers roles referenced by arbitr_pp_playbook.yaml (and their meta
+# dependencies), then bundles:
+#   1. base roles from ../range-development-ansible/roles/
+#   2. custom roles from ./roles/ (override base if same name)
+#   3. files/ (pre-staged installers — refreshed from Nexus when reachable)
+#   4. host_vars/, group_vars/, hosts, arbitr_pp_playbook.yaml, deploy.sh
+#
+# Before staging, Nexus is checked for any installer in NEXUS_FETCH below.
+# If the remote is reachable and differs from the local copy, the local file
+# is replaced. If Nexus is unreachable (e.g., running this script outside the
+# customer network), the existing local file is used and a warning is printed.
+#
+# UPSTREAM_FIXES.md is intentionally excluded.
+#
+# Usage: ./build_tarball.sh
+#
+set -euo pipefail
+
+SS_PP_AB="$(cd "$(dirname "$0")" && pwd)"
+SRC_BASE="$(cd "$SS_PP_AB/../range-development-ansible" && pwd)"
+PLAYBOOK="$SS_PP_AB/arbitr_pp_playbook.yaml"
+ARCHIVE="$SS_PP_AB/ab_pp.tgz"
+STAGE_PARENT="$(mktemp -d)"
+STAGE="$STAGE_PARENT/abpp_build"
+
+# Files we pull from Nexus before each build. Add more rows as needed.
+# Format: "<remote-url>|<local-path-relative-to-ss-pp-ab>"
+# (Empty for now — all hosts can download from Nexus directly. Re-populate
+# if a host needs to bypass HTTPS for any reason.)
+NEXUS_FETCH=()
+
+trap 'rm -rf "$STAGE_PARENT"' EXIT
+
+# --- Helpers ---------------------------------------------------------------
+
+# Extract role names from a playbook.
+# Handles three forms:
+#   roles:  - rolename
+#   roles:  - role: rolename
+#   import_role:/include_role: with a following `name:` (any indentation)
+#
+# The third form was added 2026-07-30. Without it vyos_mirror was invisible:
+# playbooks/20-vyos.yml pulls it in via `import_role` + `tasks_from` inside a
+# `tasks:` block, not a `roles:` block, so the role was never bundled and the
+# deploy would have failed on the controller with "role not found" — after
+# the tarball had already shipped.
+extract_playbook_roles() {
+  awk '
+    /^  roles:/ { inroles=1; next }
+    inroles && /^  [a-z]/ { inroles=0 }
+    inroles && /^    - / {
+      sub(/^    - role:[[:space:]]+/, "")
+      sub(/^    - /, "")
+      sub(/[ \t#].*$/, "")
+      if (length($0) > 0) print
+    }
+    # import_role / include_role — capture the name: on a following line
+    /(import_role|include_role):[[:space:]]*$/ { inrole_mod=1; next }
+    inrole_mod && /^[[:space:]]*name:[[:space:]]*/ {
+      line=$0
+      sub(/^[[:space:]]*name:[[:space:]]*/, "", line)
+      sub(/[ \t#].*$/, "", line)
+      gsub(/["\047]/, "", line)
+      if (length(line) > 0) print line
+      inrole_mod=0
+    }
+    inrole_mod && /^[[:space:]]*[a-z_]+:/ && !/name:/ { inrole_mod=0 }
+  ' "$1"
+}
+
+# Extract role-dependency names from a meta/main.yml.
+extract_meta_deps() {
+  [ -f "$1" ] || return 0
+  awk '
+    /^dependencies:/ { indeps=1; next }
+    indeps && /^[a-z]/ { indeps=0 }
+    indeps && /^[[:space:]]+-[[:space:]]+role:/ {
+      sub(/^[[:space:]]+-[[:space:]]+role:[[:space:]]+/, "")
+      sub(/[ \t#].*$/, "")
+      print
+    }
+  ' "$1"
+}
+
+# Resolve a role to its source path (custom overrides base).
+resolve_role_path() {
+  local r="$1"
+  if   [ -d "$SS_PP_AB/roles/$r" ]; then echo "$SS_PP_AB/roles/$r"
+  elif [ -d "$SRC_BASE/roles/$r" ]; then echo "$SRC_BASE/roles/$r"
+  else return 1
+  fi
+}
+
+# Membership check on a bash array.
+in_array() {
+  local needle="$1"; shift
+  for x in "$@"; do
+    [ "$x" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+# Refresh a single file from Nexus if reachable. Falls back to existing local
+# copy on any network error. Errors only if neither remote nor local exists.
+update_from_nexus() {
+  local url="$1"
+  local dest="$2"
+  local label
+  label="$(basename "$dest")"
+  local tmp="${dest}.tmp"
+
+  mkdir -p "$(dirname "$dest")"
+
+  if curl -sSfL --insecure --connect-timeout 10 --max-time 120 \
+          -o "$tmp" "$url" 2>/dev/null; then
+    if [ -s "$tmp" ]; then
+      if [ ! -f "$dest" ] || ! cmp -s "$dest" "$tmp"; then
+        mv "$tmp" "$dest"
+        echo "  refreshed from Nexus: $label"
+      else
+        rm -f "$tmp"
+        echo "  up-to-date (matches Nexus): $label"
+      fi
+    else
+      rm -f "$tmp"
+      echo "  WARN: Nexus returned empty body for $label; keeping local copy"
+    fi
+  else
+    rm -f "$tmp"
+    if [ -f "$dest" ]; then
+      echo "  Nexus unreachable; using existing local copy: $label"
+    else
+      echo "  ERROR: Nexus unreachable AND no local copy at $dest" >&2
+      return 1
+    fi
+  fi
+}
+
+# --- Refresh installers from Nexus ----------------------------------------
+
+if [ ${#NEXUS_FETCH[@]} -gt 0 ]; then
+  echo "=== Refreshing installer files from Nexus ==="
+  for entry in "${NEXUS_FETCH[@]}"; do
+    url="${entry%%|*}"
+    rel="${entry##*|}"
+    update_from_nexus "$url" "$SS_PP_AB/$rel"
+  done
+  echo ""
+fi
+
+# --- Discovery -------------------------------------------------------------
+
+[ -f "$PLAYBOOK" ] || { echo "ERROR: playbook not found at $PLAYBOOK" >&2; exit 1; }
+[ -d "$SRC_BASE/roles" ] || { echo "ERROR: base roles dir not found at $SRC_BASE/roles" >&2; exit 1; }
+
+seen=()
+queue=()
+# Scan the range playbook AND every phase playbook under playbooks/.
+#
+# This used to read $PLAYBOOK alone. Once the Security Onion phases moved
+# into playbooks/*.yml (site.yml imports them), any role referenced only
+# there was invisible to discovery — so it would not be bundled, and the
+# deploy would fail on the controller with a missing-role error after the
+# tarball had already shipped. Silent at build time, which is the worst
+# place for it.
+PLAYBOOK_SCAN=("$PLAYBOOK")
+if [ -d "$SS_PP_AB/playbooks" ]; then
+  while IFS= read -r pb; do PLAYBOOK_SCAN+=("$pb"); done \
+    < <(find "$SS_PP_AB/playbooks" -maxdepth 1 -name '*.yml' | sort)
+fi
+for pb in "${PLAYBOOK_SCAN[@]}"; do
+  while IFS= read -r r; do queue+=("$r"); done < <(extract_playbook_roles "$pb")
+done
+echo "Scanned ${#PLAYBOOK_SCAN[@]} playbook(s) for roles."
+
+missing=()
+while [ ${#queue[@]} -gt 0 ]; do
+  r="${queue[0]}"
+  queue=("${queue[@]:1}")
+  in_array "$r" "${seen[@]:-}" && continue
+  seen+=("$r")
+
+  if rolepath="$(resolve_role_path "$r")"; then
+    while IFS= read -r dep; do
+      [ -n "$dep" ] && queue+=("$dep")
+    done < <(extract_meta_deps "$rolepath/meta/main.yml")
+  else
+    missing+=("$r")
+  fi
+done
+
+# --- Stage -----------------------------------------------------------------
+
+mkdir -p "$STAGE/roles"
+
+echo "=== Base roles (from $SRC_BASE/roles) ==="
+base_count=0
+for r in "${seen[@]}"; do
+  if [ -d "$SRC_BASE/roles/$r" ]; then
+    cp -R "$SRC_BASE/roles/$r" "$STAGE/roles/"
+    echo "  base: $r"
+    base_count=$((base_count+1))
+  fi
+done
+
+echo ""
+echo "=== Custom overlays (from $SS_PP_AB/roles) ==="
+custom_count=0
+for r in "${seen[@]}"; do
+  if [ -d "$SS_PP_AB/roles/$r" ]; then
+    rm -rf "$STAGE/roles/$r"
+    cp -R "$SS_PP_AB/roles/$r" "$STAGE/roles/"
+    echo "  custom: $r"
+    custom_count=$((custom_count+1))
+  fi
+done
+
+if [ ${#missing[@]} -gt 0 ]; then
+  echo ""
+  echo "WARN: roles referenced by playbook but not found in either source:"
+  for r in "${missing[@]}"; do echo "  - $r"; done
+fi
+
+# Other deployment files
+cp -R "$SS_PP_AB/host_vars"               "$STAGE/"
+cp -R "$SS_PP_AB/group_vars"              "$STAGE/"
+cp    "$SS_PP_AB/site.yml"               "$STAGE/"
+cp -R "$SS_PP_AB/playbooks"              "$STAGE/"
+cp    "$SS_PP_AB/hosts"                   "$STAGE/"
+cp    "$SS_PP_AB/arbitr_pp_playbook.yaml" "$STAGE/"
+cp    "$SS_PP_AB/deploy.sh"               "$STAGE/"
+cp    "$SS_PP_AB/ansible.cfg"            "$STAGE/"   # vault_password_file lives here
+# Detection rulesets that MUST ship inside the tarball. These ranges target
+# platforms with no external access -- not even a proxy -- so nothing may be
+# fetched from the internet at deploy time.
+if [ -d "$SS_PP_AB/rules" ]; then
+  cp -R "$SS_PP_AB/rules" "$STAGE/"
+fi
+chmod +x "$STAGE/deploy.sh"
+# Read-only post-deploy verification script (optional but very useful).
+if [ -f "$SS_PP_AB/verify_deployment.sh" ]; then
+  cp "$SS_PP_AB/verify_deployment.sh" "$STAGE/"
+  chmod +x "$STAGE/verify_deployment.sh"
+fi
+# Ansible Galaxy collection requirements (pfsensible.core etc.)
+if [ -f "$SS_PP_AB/requirements.yml" ]; then
+  cp "$SS_PP_AB/requirements.yml" "$STAGE/"
+fi
+
+# Vendored Galaxy collection artifacts. deploy.sh installs these from disk
+# before falling back to galaxy.ansible.com, so a range never depends on
+# reaching the internet or on whatever version galaxy is serving that day.
+#
+# NOTE THE TWO ALLOWLISTS warning above: this copy AND the TAR_PATHS entry are
+# both required. Adding only TAR_PATHS packs nothing, because the directory
+# never reaches $STAGE -- which is exactly what happened on the first attempt
+# at this change.
+if [ -d "$SS_PP_AB/collections" ]; then
+  cp -R "$SS_PP_AB/collections" "$STAGE/"
+fi
+
+# Pre-staged installers (referenced via win_copy with bare filename)
+if [ -d "$SS_PP_AB/files" ]; then
+  cp -R "$SS_PP_AB/files" "$STAGE/"
+  # Strip macOS .DS_Store noise so it doesn't ride along to /etc/ansible
+  find "$STAGE/files" -name '.DS_Store' -delete 2>/dev/null || true
+fi
+
+# --- Verify ----------------------------------------------------------------
+
+# HARD GATE, not a warning. A free-form shell argument with unbalanced quotes
+# makes the PLAY FAIL TO LOAD -- not one task, the whole run, before any host
+# is touched. ss-pp-stacked 2026-09-02 shipped a tarball whose additional_dc
+# role contained the PowerShell comment "THIS host's own DNS service"; the
+# apostrophe is an unterminated string to Ansible's split_args(), which is run
+# over free-form module arguments and does not know PowerShell has comments.
+#
+# The file was valid YAML and yaml.safe_load() accepted it, which is exactly
+# why this check is separate: the tree had been validated with a parser weaker
+# than the one that would reject it.
+if [ -x "$SS_PP_AB/verify_shell_args.py" ] && command -v python3 >/dev/null 2>&1; then
+  echo ""
+  echo "=== Verifying free-form shell arguments ==="
+  if ! python3 "$SS_PP_AB/verify_shell_args.py" "$STAGE"; then
+    echo ""
+    echo "ERROR: refusing to build a tarball whose plays cannot load."
+    exit 1
+  fi
+fi
+
+# HARD GATE. A Security Onion host that is in [so_all] but not in [linux] has
+# roles to run and no way to log in: every SO play reports ok=0 unreachable=1,
+# which is indistinguishable from a VM the range never built. ss-pp-stacked
+# 2026-09-02 lost three deploy attempts to exactly that.
+if [ -x "$SS_PP_AB/verify_so_inventory.py" ] && command -v python3 >/dev/null 2>&1; then
+  echo ""
+  echo "=== Verifying Security Onion inventory membership ==="
+  if ! python3 "$SS_PP_AB/verify_so_inventory.py" "$STAGE"; then
+    echo ""
+    echo "ERROR: refusing to build a tarball whose SO hosts cannot be reached."
+    exit 1
+  fi
+fi
+
+if [ -x "$SS_PP_AB/verify_vars.py" ] && command -v python3 >/dev/null 2>&1; then
+  echo ""
+  echo "=== Verifying Jinja var references ==="
+  # Exit 3 = ROLE SCOPE ERROR: a play references a role default without
+  # including that role. It resolves in YAML and fails on the range, so it is
+  # fatal here -- three of these have cost a build/upload/deploy round trip.
+  # Exit 1 = soft warnings (usually `| default(...)` references); advisory only.
+  # `|| VERIFY_RC=$?` is REQUIRED, not stylistic: this script runs under
+  # `set -euo pipefail` (line 21), so a bare non-zero exit aborts it. The
+  # checker returns 1 for soft warnings on EVERY run, so removing the old
+  # `|| true` silently stopped the build before the Pack step -- leaving a
+  # stale ab_pp.tgz committed under seven commits' worth of changes
+  # (2026-08-05). The `||` form keeps errexit satisfied while preserving rc.
+  VERIFY_RC=0
+  python3 "$SS_PP_AB/verify_vars.py" "$STAGE" || VERIFY_RC=$?
+  if [ "$VERIFY_RC" -eq 3 ]; then
+    echo ""
+    echo "ABORTING: role-scope error(s) above would fail at run time."
+    echo "          Move the variable to group_vars/all/ and rebuild."
+    exit 1
+  fi
+fi
+
+# --- Pack ------------------------------------------------------------------
+
+cd "$STAGE"
+TAR_PATHS=(roles host_vars group_vars hosts arbitr_pp_playbook.yaml site.yml playbooks deploy.sh ansible.cfg rules)
+[ -d "collections" ] && TAR_PATHS+=(collections)
+[ -f "verify_deployment.sh" ] && TAR_PATHS+=(verify_deployment.sh)
+[ -f "requirements.yml" ] && TAR_PATHS+=(requirements.yml)
+[ -d "files" ] && TAR_PATHS+=(files)
+# macOS junk, stripped from the WHOLE stage rather than just files/. The old
+# strip covered "$STAGE/files" only, which was the one place they had been
+# noticed. .DS_Store exists in six places across the two repos.
+find "$STAGE" \( -name '.DS_Store' -o -name '._*' \) -delete 2>/dev/null || true
+
+# COPYFILE_DISABLE=1 is the load-bearing one. Apple's tar emits an AppleDouble
+# "._name" companion for every file carrying an extended attribute, and
+# com.apple.provenance is set on anything downloaded -- which is most of a
+# checked-out repo. `--no-xattrs` does NOT suppress them: measured 2026-08-07,
+# a directory with one xattr'd file produced 2 junk members with --no-xattrs
+# and 0 with COPYFILE_DISABLE=1. The archive at commit 0750421 was 942 members,
+# 471 of them junk -- exactly one companion per real file, 50% of the archive.
+#
+# It went unnoticed because Apple's `tar -tzf` HIDES AppleDouble members when
+# listing, merging them back into xattrs. Verifying with macOS tar therefore
+# cannot detect this; use python3 -c "import tarfile; tarfile.open(...)".
+#
+# Not cosmetic on the target: extraction is ADDITIVE, so junk shipped once
+# persists in /etc/ansible forever.
+COPYFILE_DISABLE=1 tar --no-xattrs \
+  --exclude='.DS_Store' --exclude='._*' \
+  -czf "$ARCHIVE" "${TAR_PATHS[@]}"
+
+echo ""
+echo "=== Archive built ==="
+ls -lh "$ARCHIVE"
+echo "Roles bundled: $(( base_count + 0 )) base + $custom_count custom = ${#seen[@]} total"

@@ -1,0 +1,81 @@
+ansible_host: "10.255.240.197"
+
+# pfSense 2.8.1 on the new SimSpace pfSense image. NIC ordering (image
+# default):
+#   vmx0 → mgmt (DHCP from SimSpace platform, becomes 10.255.240.197/20)
+#   vmx1 → WAN  (DHCP default, reconfigured static by pfsense_interface)
+#   vmx2 → INTERNAL transit toward pp-internal-router
+#
+# Sits between site-edge-router (toward pp-external-firewall + the ISP)
+# and pp-internal-router (the corp/OT downstream hub).
+#
+# Routing role (post-2026-06-10 architectural shift):
+#   - **OSPF area 0** on both data-plane interfaces (the IGP).
+#   - No iBGP. Corp /24s, DMZ /24, transit /30s all flow through OSPF.
+#   - Static back-stop for the OT umbrella (192.168.0.0/16) since OSPF
+#     doesn't carry across the ESP boundary at pp-ot-firewall.
+
+pfsense_hostname: "pp-internal-firewall"
+pfsense_domain: "voltgrid.com"
+
+pfsense_interfaces:
+  - descr: "WAN_EDGE"            # vmx1 — switch-2 transit to site-edge-router
+    interface: vmx1
+    enable: true
+    ipv4_type: static
+    ipv4_address: "172.16.0.18"
+    ipv4_prefixlen: 30
+    blockpriv: false
+    blockbogons: false
+
+  - descr: "INTERNAL"            # vmx2 — switch-3 transit to pp-internal-router
+    interface: vmx2
+    enable: true
+    ipv4_type: static
+    ipv4_address: "172.16.0.25"
+    ipv4_prefixlen: 30
+
+pfsense_default_gw_name: "GW_EDGE"
+
+pfsense_gateways:
+  - name: "GW_EDGE"
+    interface: "WAN_EDGE"
+    gateway: "172.16.0.17"       # site-edge-router
+  - name: "GW_INT_ROUTER"
+    interface: "INTERNAL"
+    gateway: "172.16.0.26"       # pp-internal-router
+
+# OSPF carries all corp + transit prefixes — no per-/24 statics needed.
+# OT umbrella is the only static — pp-ot-firewall doesn't speak OSPF
+# (ESP boundary), so the OT prefixes never enter the OSPF domain.
+pfsense_routes:
+  - network: "192.168.0.0/16"
+    gateway: "GW_INT_ROUTER"
+    descr: "OT umbrella via pp-internal-router (ESP boundary)"
+
+pfsense_rules:
+  # Security Onion GRE mirror: pp-isp-router -> so-sensor-edge.
+  # Currently REDUNDANT — the lab-mode permit-any rule on WAN_EDGE already
+  # passes proto 47. Stated explicitly so the dependency is visible in config
+  # and survives tightening; without GRE the sensor shows a healthy tunnel and
+  # zero received packets, which is a genuinely slow thing to diagnose.
+  - name: "Allow GRE mirror pp-isp-router -> so-sensor-edge"
+    interface: "WAN_EDGE"
+    protocol: "gre"
+    source: "75.21.1.2"
+    destination: "172.16.9.42"
+  - name: "Allow any on WAN_EDGE (lab)"
+    interface: "WAN_EDGE"
+  - name: "Allow any on INTERNAL (lab)"
+    interface: "INTERNAL"
+
+# OSPF area 0 on both transit /30s. Both adjacencies will form: WAN_EDGE
+# with site-edge-router (.17), INTERNAL with pp-internal-router (.26).
+pfsense_ospf:
+  router_id: "172.16.0.18"
+  networks:
+    - network: "172.16.0.16/30"  # WAN_EDGE link to site-edge
+      area: "0.0.0.0"
+    - network: "172.16.0.24/30"  # INTERNAL link to pp-internal-router
+      area: "0.0.0.0"
+  redistribute_static: true       # advertise the OT umbrella into OSPF

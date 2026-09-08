@@ -1,0 +1,74 @@
+---
+# =========================================================================
+# 70-analyst.yml — verify the analyst workstations can actually USE SO
+# =========================================================================
+# Phases 10-60 build and prove the grid. This one is about the humans: can
+# someone sitting at a hunt box log into the SOC WebUI?
+#
+# Nothing here CHANGES anything. Both prerequisites are handled elsewhere:
+#
+#   * Network access — nothing to do. so-setup seeded ALLOW_CIDR with
+#     so_subnet_security (172.16.9.0/24) from the manager answer file, so the
+#     `analyst` hostgroup already covers every host on pp-security. Verified
+#     2026-08-04: `so-firewall listhostgroup analyst` shows the CIDR and
+#     win-hunt-1 reports TcpTestSucceeded on 443.
+#
+#   * Clock — fixed range-wide by playbooks/05-time.yml. This originally
+#     carried its own [hunt]-scoped clock fix; that was folded into 05-time
+#     on 2026-08-04 when the decision was made to correct the whole estate,
+#     since two playbooks setting the same clock is a race waiting to happen.
+#
+# What remains is proving the two hold together, because they fail in ways
+# that look nothing alike: a firewall problem gives a connection timeout, a
+# clock problem gives "This login form has expired" with no server-side
+# error at all.
+# =========================================================================
+
+- name: Analyst access — prove the hunt boxes can reach and log into SOC
+  hosts: hunt
+  gather_facts: false
+  vars:
+    range_utc: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+    soc_ip: "{{ hostvars[groups['so_manager'][0]]['so_prod_ip'] }}"
+  tasks:
+    - name: SOC WebUI is reachable on 443
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          Write-Output (Test-NetConnection -ComputerName '{{ soc_ip }}' -Port 443 -WarningAction SilentlyContinue).TcpTestSucceeded
+      register: soc_reach
+      changed_when: false
+      failed_when: not (soc_reach.output[0] | bool)
+
+    # The clock check is the one that matters. kratos mints a login flow
+    # carrying `expires_at` and the BROWSER compares it against its own
+    # clock; flows live 60 minutes, so a client hours fast sees every fresh
+    # flow as already expired and loops forever. Tolerance here is well
+    # inside that lifespan.
+    - name: Clock is close enough to range UTC for kratos login flows
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          $target = [DateTime]::ParseExact(
+            '{{ range_utc }}', 'yyyy-MM-ddTHH:mm:ssZ',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AssumeUniversal -bor
+            [Globalization.DateTimeStyles]::AdjustToUniversal)
+          # Parentheses are load-bearing. `Write-Output [Math]::Abs(...)` parses in
+          # ARGUMENT mode and emits the literal string "[Math]::Abs(...)", which
+          # Jinja's `| float` silently turns into 0.0 -- so the drift check could
+          # never fail. .ToString() keeps it a plain scalar rather than a
+          # serialized object. See UPSTREAM_FIXES 2026-08-04 (later 7).
+          Write-Output ([Math]::Abs(((Get-Date).ToUniversalTime() - $target).TotalSeconds).ToString())
+      register: drift
+      changed_when: false
+      failed_when: (drift.output[0] | float) > 120
+
+    - name: Report analyst readiness
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: SOC https://{{ soc_ip }} reachable on 443,
+          clock {{ '%.0f' | format(drift.output[0] | float) }}s from range UTC.
+          Log in as {{ so_web_user }}.
+  tags:
+    - analyst

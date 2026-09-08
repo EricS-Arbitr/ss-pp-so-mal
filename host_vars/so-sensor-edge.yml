@@ -1,0 +1,61 @@
+# host_vars/so-sensor-edge.yml — Security Onion sensor — edge/attack path
+# Blueprint: ARBITR_PP_1455 · image RDP_Ubuntu_Desktop_22.04.5:1.1.0 (8c/16G)
+# Prod: pp-security 172.16.9.42/24 → gw 172.16.9.1   Mgmt: 10.255.240.138/20 (position FIRST)
+ansible_host: 10.255.240.138
+
+# --- `common` role schema (ss-pp-ab convention, cf. host_vars/pp-splunk.yml) ---
+network_interfaces:
+  - name: "eth0"                      # mgmt — out-of-band, no gateway in-scenario
+    ipv4:
+      type: "ethernet"
+      address: "10.255.240.138"
+      netmask: "255.255.240.0"
+      gateway: ""
+  - name: "eth1"                      # pp-security (in-scenario)
+    ipv4:
+      type: "ethernet"
+      address: "172.16.9.42"
+      netmask: "255.255.255.0"
+      gateway: "172.16.9.1"
+    dns:
+      - "172.16.2.7"                  # pp-dc01, matching pp-splunk
+
+# --- so-ansible role contract ---
+so_role: "sensor"
+so_hostname: "so-sensor-edge"
+so_prod_ip: "172.16.9.42"
+so_prod_prefix: 24
+so_prod_gateway: "172.16.9.1"
+so_prod_dns:
+  - "172.16.2.7"
+
+# --- GRE mirror endpoint (pairs with pp-isp-router) ---
+# The /30 is arbitrary but must be unused and must match the router's
+# vyos_gre_* values.
+so_gre_tunnel_local: "10.100.3.2"
+so_gre_tunnel_remote: "10.100.3.1"
+so_gre_tunnel_prefix: 30
+so_monitor_interface: "tun0"
+
+# The mirroring router's GRE endpoint -- the UNDERLAY remote, i.e. the source
+# address the encapsulated packets actually arrive from. Drives two things:
+#   * the netplan tunnel's `remote:` (kernel will not decapsulate unless this
+#     matches the sender exactly)
+#   * the sensor's SO firewall ACCEPT for proto 47
+#
+# PORTING TRAP: in the so-ansible dev range this value happened to EQUAL the
+# sensor's so_prod_gateway, because the mirroring router was also the sensor's
+# gateway. Both the firewall rule and the netplan template were written against
+# that coincidence. Here every sensor's gateway is 172.16.9.1 while the
+# mirroring routers are elsewhere entirely, so it must be stated explicitly.
+# There is deliberately NO default -- so_sensor fails loudly if it is unset.
+so_gre_remote_underlay: "75.21.1.2"   # pp-isp-router vyos_gre_source_ip
+
+# --- 60-verify traffic targets ---
+# Hosts ON pp-isp-router's mirrored eth2 (200.200.200.0/24). Every range host
+# defaults toward is-inet, so this path is exercised constantly and is the most
+# reliable of the three. Do NOT use 210.210.210.1 or 200.200.200.1 -- those are
+# the router's own interface addresses (PORTING_GUIDE 9.10).
+so_verify_mirror_targets:
+  - "200.200.200.2"    # is-inet (eth2)
+  - "200.200.200.205"  # elgg    (eth2)

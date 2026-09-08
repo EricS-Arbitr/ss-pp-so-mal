@@ -1,0 +1,21 @@
+# Connection settings for the [pfsense] inventory group.
+# pfsensible.core modules drive pfSense via SSH + PHP, so we use plain SSH
+# (not winrm). pfSense 2.8.1 ships Python at /usr/local/bin/python3.11.
+#
+# Custom SimSpace pfSense image (2.8.1) provisions two interactive users:
+#   admin:simspace1
+#   simspace:simspace1
+# We use `admin` because pfsensible.core writes /cf/conf/config.xml directly
+# (no sudo), and only admin has write access on that root-owned file. With
+# `simspace` the module fails on the rename-then-copy fallback that the
+# collection performs whenever /tmp and /cf are on separate filesystems
+# (which they always are on pfSense): `PermissionError: '/cf/conf/config.xml'`.
+ansible_connection: ssh
+ansible_user: admin
+ansible_ssh_pass: "{{ vault_pfsense_password }}"
+ansible_become: false
+ansible_python_interpreter: /usr/local/bin/python3.11
+
+# Suppress strict host-key checking — SimSpace re-provisions VMs with new
+# host keys each range refresh.
+ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Billing history</h1>
+<table class="data">
+  <thead>
+    <tr>
+      <th>Period</th>
+      <th>Issued</th>
+      <th>Due</th>
+      <th>kWh</th>
+      <th>Amount</th>
+      <th>Status</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for b in bills %}
+      <tr>
+        <td>{{ b['period_start'] }} &mdash; {{ b['period_end'] }}</td>
+        <td>{{ b['issued_date'] }}</td>
+        <td>{{ b['due_date'] }}</td>
+        <td>{{ '%.1f' | format(b['kwh_used']) }}</td>
+        <td>${{ '%.2f' | format(b['amount_due']) }}</td>
+        <td>
+          {% if b['paid'] %}
+            <span class="status paid">Paid {{ b['paid_date'] }}</span>
+          {% else %}
+            <span class="status unpaid">Unpaid</span>
+          {% endif %}
+        </td>
+        <td><a href="{{ url_for('bill_detail', bill_id=b['id']) }}">View</a></td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

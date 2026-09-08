@@ -1,0 +1,61 @@
+# host_vars/so-sensor-corp.yml — Security Onion sensor — corporate
+# Blueprint: ARBITR_PP_1455 · image RDP_Ubuntu_Desktop_22.04.5:1.1.0 (8c/16G)
+# Prod: pp-security 172.16.9.40/24 → gw 172.16.9.1   Mgmt: 10.255.240.139/20 (position FIRST)
+ansible_host: 10.255.240.139
+
+# --- `common` role schema (ss-pp-ab convention, cf. host_vars/pp-splunk.yml) ---
+network_interfaces:
+  - name: "eth0"                      # mgmt — out-of-band, no gateway in-scenario
+    ipv4:
+      type: "ethernet"
+      address: "10.255.240.139"
+      netmask: "255.255.240.0"
+      gateway: ""
+  - name: "eth1"                      # pp-security (in-scenario)
+    ipv4:
+      type: "ethernet"
+      address: "172.16.9.40"
+      netmask: "255.255.255.0"
+      gateway: "172.16.9.1"
+    dns:
+      - "172.16.2.7"                  # pp-dc01, matching pp-splunk
+
+# --- so-ansible role contract ---
+so_role: "sensor"
+so_hostname: "so-sensor-corp"
+so_prod_ip: "172.16.9.40"
+so_prod_prefix: 24
+so_prod_gateway: "172.16.9.1"
+so_prod_dns:
+  - "172.16.2.7"
+
+# --- GRE mirror endpoint (pairs with pp-corp-router) ---
+# The /30 is arbitrary but must be unused and must match the router's
+# vyos_gre_* values.
+so_gre_tunnel_local: "10.100.1.2"
+so_gre_tunnel_remote: "10.100.1.1"
+so_gre_tunnel_prefix: 30
+so_monitor_interface: "tun0"
+
+# The mirroring router's GRE endpoint -- the UNDERLAY remote, i.e. the source
+# address the encapsulated packets actually arrive from. Drives two things:
+#   * the netplan tunnel's `remote:` (kernel will not decapsulate unless this
+#     matches the sender exactly)
+#   * the sensor's SO firewall ACCEPT for proto 47
+#
+# PORTING TRAP: in the so-ansible dev range this value happened to EQUAL the
+# sensor's so_prod_gateway, because the mirroring router was also the sensor's
+# gateway. Both the firewall rule and the netplan template were written against
+# that coincidence. Here every sensor's gateway is 172.16.9.1 while the
+# mirroring routers are elsewhere entirely, so it must be stated explicitly.
+# There is deliberately NO default -- so_sensor fails loudly if it is unset.
+so_gre_remote_underlay: "172.16.0.42"   # pp-corp-router vyos_gre_source_ip
+
+# --- 60-verify traffic targets ---
+# Hosts ON pp-corp-router's mirrored subnets -- never the router's own .1
+# addresses, which are locally delivered and generate no mirrorable traffic
+# (so-ansible PORTING_GUIDE 9.10). These exercise eth0/eth1/eth2.
+so_verify_mirror_targets:
+  - "172.16.2.7"     # pp-dc01         PP-Services            (eth0)
+  - "172.16.4.10"    # pp-eng-wkstn-1  PP-Eng-Department      (eth2)
+  - "172.16.3.3"     # pp-bp-wkstn-2   PP-Business-Processing (eth1)

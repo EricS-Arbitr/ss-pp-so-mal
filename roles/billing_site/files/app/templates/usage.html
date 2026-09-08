@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Daily energy usage</h1>
+<p class="sub">Last 90 days, in kWh.</p>
+
+{% set max_kwh = (readings | map(attribute='kwh') | list | max) if readings else 1 %}
+<div class="bar-chart">
+  {% for r in readings %}
+    <div class="bar"
+         style="height: {{ (r['kwh'] / max_kwh * 100) | round(1) }}%;"
+         title="{{ r['reading_date'] }}: {{ '%.2f' | format(r['kwh']) }} kWh">
+    </div>
+  {% endfor %}
+</div>
+
+<table class="data narrow">
+  <thead><tr><th>Date</th><th>kWh</th></tr></thead>
+  <tbody>
+    {% for r in readings[-14:] | reverse %}
+      <tr><td>{{ r['reading_date'] }}</td><td>{{ '%.2f' | format(r['kwh']) }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="hint">Showing last 14 days in the table; chart above covers 90.</p>
+{% endblock %}

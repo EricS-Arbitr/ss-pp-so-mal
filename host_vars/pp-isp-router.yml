@@ -1,0 +1,94 @@
+ansible_host: "10.255.240.189"
+
+# SimSpace provisions: eth0 = first data-plane (shared with mgmt 10.255.240.189/20)
+network_interfaces:
+  - name: "eth0"                      # switch-0 transit to pp-external-firewall (mgmt shares)
+    ipv4:
+      address: "75.21.1.2"
+      netmask: "255.255.255.252"
+      type: "ethernet"
+      ospf: true
+  - name: "eth1"                      # red-net (external/red-team sim)
+    ipv4:
+      address: "210.210.210.1"
+      netmask: "255.255.255.0"
+      type: "ethernet"
+      ospf: true
+  - name: "eth2"                      # PowerPlant-External-Placeholder (external sim)
+    ipv4:
+      address: "200.200.200.1"
+      netmask: "255.255.255.0"
+      type: "ethernet"
+      ospf: true
+
+static_route:
+  route: "0.0.0.0/0"
+  next_hop: "200.200.200.2"           # is-inet — owns all simulated public IP /32s on lo
+
+# pp-external-firewall (pfSense 2.8.1) runs FRR/BGP, so the eBGP session
+# is live. pp-external-firewall redistributes connected (75.21.1.0/30 and
+# 172.16.8.0/24 DMZ), so those are learned. But the deeper corp /24s
+# (172.16.2-6.0/24, 172.16.9.0/24) and OT (192.168.0.0/16) are NOT in
+# pp-external-firewall's BGP table because of iBGP no-readvertise on
+# pp-internal-router (see pp-internal-firewall.yml comment and
+# UPSTREAM_FIXES.md). They never propagate out to the eBGP edge.
+#
+# Back-stop with explicit umbrella statics here so return traffic from
+# is-inet (or from anything riding through pp-isp-router) makes it back
+# to corp. Will become unnecessary if/when route-reflector-client is
+# configured on pp-internal-router.
+extra_static_routes:
+  - network: "172.16.0.0/16"
+    next_hop: "75.21.1.1"             # pp-external-firewall (pfSense)
+    descr: "Corp umbrella via pp-external-firewall (iBGP no-readvertise back-stop)"
+  - network: "192.168.0.0/16"
+    next_hop: "75.21.1.1"             # pp-external-firewall (pfSense)
+    descr: "OT umbrella via pp-external-firewall"
+
+# SimSpace's VyOS image bakes a stale `0.0.0.0/0` for each of this host's
+# /24 interface IPs (eth1=210.210.210.1 red-net, eth2=200.200.200.1
+# ext-placeholder). Same self-loop pattern as pp-internal-router — strip so
+# only the real default (0.0.0.0/0 → 200.200.200.2 is-inet) remains.
+# See UPSTREAM_FIXES.md (2026-05-27 entry).
+extra_static_routes_remove:
+  - network: "0.0.0.0/0"
+    next_hop: "200.200.200.1"         # own eth2 IP (self-loop)
+  - network: "0.0.0.0/0"
+    next_hop: "210.210.210.1"         # own eth1 IP (self-loop)
+
+bgp:
+  - as: 65002
+    neighbor:
+      ip: "75.21.1.1"                 # pp-external-firewall (AS 65001 — eBGP)
+      as: 65001
+
+# --- Security Onion GRE mirror → so-sensor-edge -------------------------
+# Mirrors the external-facing interfaces into a GRE tunnel terminating on
+# so-sensor-edge (172.16.9.42). This is the attack-path sensor: it sees
+# inbound traffic and Internet↔DMZ BEFORE the external firewall, which is
+# the one blind spot the corp and OT sensors cannot cover.
+# eth0 (switch-0 transit, shares mgmt) excluded.
+#
+# The tunnel crosses TWO pfSense firewalls —
+#   pp-isp-router → pp-external-firewall → site-edge-router
+#                 → pp-internal-firewall → pp-internal-router → pp-security
+# BOTH already pass it: each runs lab-mode permit-any on every interface with
+# blockpriv/blockbogons off (verified 2026-07-30). Explicit narrow GRE rules
+# were added to both firewalls' host_vars so the dependency survives a future
+# tightening pass.
+vyos_mirror_source_interfaces:
+  - eth1   # red-net    210.210.210.0/24  (Red-1 Kali, Activity-Emulation)
+  - eth2   # Internet   200.200.200.0/24  (is-inet, elgg)
+
+vyos_gre_source_ip: "75.21.1.2"        # eth0, routes toward pp-security
+vyos_gre_remote_ip: "172.16.9.42"      # so-sensor-edge
+vyos_gre_local_addr: "10.100.3.1"
+vyos_gre_remote_addr: "10.100.3.2"
+vyos_gre_tunnel_prefix: 30
+
+# Do NOT mirror management-plane traffic. eth0 on this router shares the mgmt
+# IP with a data-plane gateway, so a bare matchall mirror would copy every
+# Ansible SSH/WinRM session into the sensor. Rendered by vyos_mirror as tc
+# `action pass` filters ahead of the catch-all, matching src and dst.
+vyos_mirror_exclude_cidrs:
+  - "10.255.240.0/20"

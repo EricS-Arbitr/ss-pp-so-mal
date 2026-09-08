@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Voltgrid Power — Customer Portal</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">&#9889;</span>
+      <a href="{{ url_for('index') }}">Voltgrid Power Co.</a>
+    </div>
+    {% if customer %}
+      <nav class="mainnav">
+        <a href="{{ url_for('dashboard') }}">Dashboard</a>
+        <a href="{{ url_for('bills') }}">Bills</a>
+        <a href="{{ url_for('usage') }}">Usage</a>
+        <a href="{{ url_for('pay') }}">Pay</a>
+        <a href="{{ url_for('profile') }}">Profile</a>
+        <a href="{{ url_for('logout') }}" class="logout">Log out ({{ customer['full_name'] }})</a>
+      </nav>
+    {% endif %}
+  </header>
+  <main class="content">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <ul class="flashes">
+          {% for cat, msg in messages %}
+            <li class="flash flash-{{ cat }}">{{ msg }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="sitefoot">
+    &copy; Voltgrid Power Co. &mdash; Service Area: PA &mdash; Customer Care: 1-800-VOLTGRID
+  </footer>
+</body>
+</html>

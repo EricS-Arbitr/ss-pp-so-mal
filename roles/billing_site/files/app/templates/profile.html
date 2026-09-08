@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Account profile</h1>
+
+<table class="data narrow">
+  <tr><th>Full name</th><td>{{ customer['full_name'] }}</td></tr>
+  <tr><th>Account number</th><td>{{ customer['account_number'] }}</td></tr>
+  <tr><th>Username</th><td>{{ customer['username'] }}</td></tr>
+  <tr><th>Email</th><td>{{ customer['email'] }}</td></tr>
+  <tr><th>Service address</th>
+    <td>{{ customer['address'] }}<br>{{ customer['city'] }}, {{ customer['state'] }} {{ customer['zip'] }}</td>
+  </tr>
+  <tr><th>Service start date</th><td>{{ customer['service_start_date'] }}</td></tr>
+</table>
+
+<p class="hint">To update account info, please call 1-800-VOLTGRID or visit one of our service centers.</p>
+{% endblock %}

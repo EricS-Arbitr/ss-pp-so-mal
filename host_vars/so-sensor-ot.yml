@@ -1,0 +1,65 @@
+# host_vars/so-sensor-ot.yml — Security Onion sensor — OT
+# Blueprint: ARBITR_PP_1455 · image RDP_Ubuntu_Desktop_22.04.5:1.1.0 (8c/16G)
+# Prod: pp-security 172.16.9.41/24 → gw 172.16.9.1   Mgmt: 10.255.240.137/20 (position FIRST)
+ansible_host: 10.255.240.137
+
+# --- `common` role schema (ss-pp-ab convention, cf. host_vars/pp-splunk.yml) ---
+network_interfaces:
+  - name: "eth0"                      # mgmt — out-of-band, no gateway in-scenario
+    ipv4:
+      type: "ethernet"
+      address: "10.255.240.137"
+      netmask: "255.255.240.0"
+      gateway: ""
+  - name: "eth1"                      # pp-security (in-scenario)
+    ipv4:
+      type: "ethernet"
+      address: "172.16.9.41"
+      netmask: "255.255.255.0"
+      gateway: "172.16.9.1"
+    dns:
+      - "172.16.2.7"                  # pp-dc01, matching pp-splunk
+
+# --- so-ansible role contract ---
+so_role: "sensor"
+so_hostname: "so-sensor-ot"
+so_prod_ip: "172.16.9.41"
+so_prod_prefix: 24
+so_prod_gateway: "172.16.9.1"
+so_prod_dns:
+  - "172.16.2.7"
+
+# --- GRE mirror endpoint (pairs with pp-ot-router) ---
+# The /30 is arbitrary but must be unused and must match the router's
+# vyos_gre_* values.
+so_gre_tunnel_local: "10.100.2.2"
+so_gre_tunnel_remote: "10.100.2.1"
+so_gre_tunnel_prefix: 30
+so_monitor_interface: "tun0"
+
+# The mirroring router's GRE endpoint -- the UNDERLAY remote, i.e. the source
+# address the encapsulated packets actually arrive from. Drives two things:
+#   * the netplan tunnel's `remote:` (kernel will not decapsulate unless this
+#     matches the sender exactly)
+#   * the sensor's SO firewall ACCEPT for proto 47
+#
+# PORTING TRAP: in the so-ansible dev range this value happened to EQUAL the
+# sensor's so_prod_gateway, because the mirroring router was also the sensor's
+# gateway. Both the firewall rule and the netplan template were written against
+# that coincidence. Here every sensor's gateway is 172.16.9.1 while the
+# mirroring routers are elsewhere entirely, so it must be stated explicitly.
+# There is deliberately NO default -- so_sensor fails loudly if it is unset.
+so_gre_remote_underlay: "192.168.200.202"   # pp-ot-router vyos_gre_source_ip
+
+# --- 60-verify traffic targets ---
+# Hosts ON pp-ot-router's mirrored subnets. 192.168.95.2 is the OT address
+# CLAUDE.md's own L3 verification recipe uses (`tracert -d 192.168.95.2` from a
+# corp workstation), so corp->OT is a supported path.
+#
+# NOTE: traffic is generated from so-manager, so it crosses pp-ot-firewall
+# (default-deny, ESP boundary). If this check fails with 0 packets, confirm
+# ICMP corp->OT is permitted there BEFORE suspecting the mirror -- a firewall
+# drop and a broken mirror look identical from the sensor.
+so_verify_mirror_targets:
+  - "192.168.95.2"     # Gas-Turbine          (eth1)
+  - "192.168.100.5"    # pp-dc03  PP-OT-Ctrl  (eth4)

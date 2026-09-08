@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Bill #{{ bill['id'] }}</h1>
+<p class="sub">Account holder: {{ owner['full_name'] }} ({{ owner['account_number'] }})</p>
+
+<table class="data narrow">
+  <tr><th>Service period</th><td>{{ bill['period_start'] }} &mdash; {{ bill['period_end'] }}</td></tr>
+  <tr><th>Issued</th><td>{{ bill['issued_date'] }}</td></tr>
+  <tr><th>Due</th><td>{{ bill['due_date'] }}</td></tr>
+  <tr><th>Energy used</th><td>{{ '%.2f' | format(bill['kwh_used']) }} kWh</td></tr>
+  <tr><th>Amount due</th><td>${{ '%.2f' | format(bill['amount_due']) }}</td></tr>
+  <tr><th>Status</th>
+    <td>
+      {% if bill['paid'] %}
+        <span class="status paid">Paid {{ bill['paid_date'] }}</span>
+      {% else %}
+        <span class="status unpaid">Unpaid</span>
+      {% endif %}
+    </td>
+  </tr>
+</table>
+
+<p><a href="{{ url_for('bills') }}">&larr; Back to all bills</a></p>
+{% endblock %}

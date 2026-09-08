@@ -1,0 +1,123 @@
+---
+# billing_site — Voltgrid Power customer billing portal on pp-www.
+#
+# Architecture (host-direct, no Docker for billing itself):
+#   - Flask + gunicorn runs as a systemd service bound to 127.0.0.1:5000
+#   - Host nginx terminates :80 and reverse-proxies by Host header:
+#       billing.voltgrid.com -> 127.0.0.1:5000   (Flask)
+#       (everything else)    -> 127.0.0.1:8080   (WordPress container from
+#                                                 wordpress-pv role)
+#   - SQLite DB lives at /var/lib/billing/billing.db, seeded once by init_db.py
+#
+# Requires the wordpress-pv overlay in this repo, which binds the WordPress
+# container on 127.0.0.1:8080 so host nginx can reach it on loopback.
+
+- name: Ensure billing directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: simspace
+    group: simspace
+    mode: '0755'
+  loop:
+    - /opt/billing
+    - /opt/billing/app
+    - /var/lib/billing
+
+- name: Install host packages for billing portal
+  ansible.builtin.apt:
+    name:
+      - python3
+      - python3-venv
+      - python3-pip
+      - nginx
+    state: present
+    update_cache: false
+
+- name: Sync Flask app source
+  ansible.builtin.copy:
+    src: app/
+    dest: /opt/billing/app/
+    owner: simspace
+    group: simspace
+    mode: preserve
+  register: app_sync
+  notify: restart billing
+
+- name: Create Python virtualenv at /opt/billing/venv
+  ansible.builtin.command:
+    cmd: python3 -m venv /opt/billing/venv
+    creates: /opt/billing/venv/bin/activate
+  become_user: simspace
+
+- name: Install Flask + Werkzeug + gunicorn into virtualenv (via corp proxy)
+  ansible.builtin.pip:
+    requirements: /opt/billing/app/requirements.txt
+    virtualenv: /opt/billing/venv
+  become_user: simspace
+  environment:
+    HTTP_PROXY:  "http://{{ inet_proxy_addr }}:{{ inet_proxy_port }}"
+    HTTPS_PROXY: "http://{{ inet_proxy_addr }}:{{ inet_proxy_port }}"
+  notify: restart billing
+
+- name: Seed billing SQLite DB (idempotent — skips if file exists)
+  ansible.builtin.command:
+    cmd: /opt/billing/venv/bin/python /opt/billing/app/init_db.py
+    creates: /var/lib/billing/billing.db
+  become_user: simspace
+  environment:
+    DB_PATH: /var/lib/billing/billing.db
+
+- name: Render billing systemd unit
+  ansible.builtin.template:
+    src: billing.service.j2
+    dest: /etc/systemd/system/billing.service
+    mode: '0644'
+  notify: restart billing
+
+- name: Render nginx vhost — billing.voltgrid.com
+  ansible.builtin.template:
+    src: billing.voltgrid.com.conf.j2
+    dest: /etc/nginx/sites-available/billing.voltgrid.com.conf
+    mode: '0644'
+  notify: reload nginx
+
+- name: Render nginx default vhost — WordPress
+  ansible.builtin.template:
+    src: wordpress-default.conf.j2
+    dest: /etc/nginx/sites-available/wordpress-default.conf
+    mode: '0644'
+  notify: reload nginx
+
+- name: Enable billing nginx vhost
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/billing.voltgrid.com.conf
+    dest: /etc/nginx/sites-enabled/billing.voltgrid.com.conf
+    state: link
+  notify: reload nginx
+
+- name: Enable WordPress default nginx vhost
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/wordpress-default.conf
+    dest: /etc/nginx/sites-enabled/wordpress-default.conf
+    state: link
+  notify: reload nginx
+
+- name: Remove stock nginx default site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: reload nginx
+
+- name: Enable + start billing service
+  ansible.builtin.systemd:
+    name: billing
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Ensure nginx is enabled and running
+  ansible.builtin.systemd:
+    name: nginx
+    state: started
+    enabled: true

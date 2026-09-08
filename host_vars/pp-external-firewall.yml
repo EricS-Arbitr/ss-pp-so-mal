@@ -1,0 +1,148 @@
+ansible_host: "10.255.240.191"
+
+# pfSense 2.8.1 on the new SimSpace pfSense image. NIC ordering:
+#   vmx0 → mgmt (DHCP, 10.255.240.191/20)
+#   vmx1 → WAN_ISP (75.21.1.1/30 toward pp-isp-router)
+#   vmx2 → DMZ (172.16.8.1/24 PP-DMZ gateway)
+#   vmx3 → EDGE_TRANSIT (172.16.0.9/30 toward site-edge-router)
+#
+# Corp edge router (post-2026-06-10 architectural shift):
+#   - **eBGP** AS 65001 ↔ AS 65002 to pp-isp-router on vmx1 (WAN). This is
+#     the ONLY BGP session in the network now.
+#   - **OSPF area 0** on vmx2 (DMZ) and vmx3 (EDGE_TRANSIT) — the IGP for
+#     the corp domain. WAN_ISP stays out of OSPF (it's the eBGP edge).
+#   - **Mutual redistribution** at the edge:
+#       - OSPF → BGP: corp prefixes flow to the ISP.
+#       - BGP → OSPF: the default learned from the ISP can be re-originated
+#         into OSPF via `default-information originate`.
+#   - Outbound NAT disabled (transit firewall behavior).
+
+pfsense_hostname: "pp-external-firewall"
+pfsense_domain: "voltgrid.com"
+
+pfsense_interfaces:
+  - descr: "WAN_ISP"             # vmx1 — switch-0 transit to pp-isp-router (eBGP)
+    interface: vmx1
+    enable: true
+    ipv4_type: static
+    ipv4_address: "75.21.1.1"
+    ipv4_prefixlen: 30
+    blockpriv: false
+    blockbogons: false
+
+  - descr: "DMZ"                 # vmx2 — PP-DMZ subnet gateway (OSPF)
+    interface: vmx2
+    enable: true
+    ipv4_type: static
+    ipv4_address: "172.16.8.1"
+    ipv4_prefixlen: 24
+
+  - descr: "EDGE_TRANSIT"        # vmx3 — switch-1 transit to site-edge-router (OSPF)
+    interface: vmx3
+    enable: true
+    ipv4_type: static
+    ipv4_address: "172.16.0.9"
+    ipv4_prefixlen: 30
+
+pfsense_default_gw_name: "GW_ISP"
+
+pfsense_gateways:
+  - name: "GW_ISP"
+    interface: "WAN_ISP"
+    gateway: "75.21.1.2"         # pp-isp-router
+  - name: "GW_EDGE_TRANSIT"
+    interface: "EDGE_TRANSIT"
+    gateway: "172.16.0.10"       # site-edge-router
+
+# OSPF (via area 0) now carries corp /24s into pp-external-firewall, so
+# the only static needed is the OT umbrella back-stop — pp-ot-firewall
+# is the ESP boundary and doesn't speak OSPF.
+pfsense_routes:
+  - network: "192.168.0.0/16"
+    gateway: "GW_EDGE_TRANSIT"
+    descr: "OT umbrella via site-edge-router (ESP boundary)"
+
+pfsense_rules:
+  # Security Onion GRE mirror: pp-isp-router -> so-sensor-edge.
+  # Currently REDUNDANT — the lab-mode permit-any rule on WAN_ISP already
+  # passes proto 47. Stated explicitly so the dependency is visible in config
+  # and survives tightening; without GRE the sensor shows a healthy tunnel and
+  # zero received packets, which is a genuinely slow thing to diagnose.
+  - name: "Allow GRE mirror pp-isp-router -> so-sensor-edge"
+    interface: "WAN_ISP"
+    protocol: "gre"
+    source: "75.21.1.2"
+    destination: "172.16.9.42"
+  - name: "Allow any on WAN_ISP (lab)"
+    interface: "WAN_ISP"
+  - name: "Allow any on DMZ (lab)"
+    interface: "DMZ"
+  - name: "Allow any on EDGE_TRANSIT (lab)"
+    interface: "EDGE_TRANSIT"
+
+# OSPF area 0 on the two corp-facing interfaces. WAN_ISP is NOT in the
+# network list so OSPF doesn't form there (eBGP-only edge). DMZ network
+# is advertised into OSPF so corp learns the route to pp-www.
+#
+# Deliberately NO `redistribute_connected` and NO `redistribute_bgp`:
+#   - redistribute_connected would leak 10.255.240.0/20 (SimSpace mgmt
+#     orchestration network on vmx0) into corp OSPF.
+#   - redistribute_bgp would bridge BGP's-redistribute-connected back into
+#     OSPF, with the same leak.
+# We DO redistribute static (for the OT umbrella back-stop) and originate
+# a default route (corp learns the WAN exit via OSPF).
+pfsense_ospf:
+  router_id: "172.16.0.9"
+  networks:
+    - network: "172.16.8.0/24"    # DMZ
+      area: "0.0.0.0"
+    - network: "172.16.0.8/30"    # EDGE_TRANSIT transit to site-edge
+      area: "0.0.0.0"
+  redistribute_static: true        # advertise OT umbrella + any other statics into OSPF
+  default_originate: true          # advertise 0.0.0.0/0 into OSPF (corp learns the WAN exit)
+
+# eBGP-only: single peer to pp-isp-router. No iBGP — corp IGP is OSPF.
+# `redistribute_ospf: true` pushes corp OSPF prefixes upstream to the ISP
+# so return traffic from is-inet finds its way back. Connected/static
+# redistribute is explicitly OFF — corp's OSPF table is already in BGP
+# via `redistribute ospf`, and we MUST NOT advertise 10.255.240.0/20 mgmt.
+pfsense_bgp:
+  asn: 65001
+  router_id: "172.16.0.9"
+  redistribute_ospf: true
+  redistribute_connected: false    # explicit — no mgmt leak to ISP
+  redistribute_static: false
+  neighbors:
+    - peer_ip: "75.21.1.2"
+      remote_as: 65002
+      description: "pp-isp-router (eBGP edge — only BGP session in the fabric)"
+
+# --- Inbound NAT port-forwards ------------------------------------------
+# Public-facing HTTP/HTTPS for voltgrid.com properties land on this box's
+# WAN interface (75.21.1.1) and DNAT to pp-www (172.16.8.5) in the DMZ.
+# pp-www's host nginx (installed by the billing_site role) then vhost-routes:
+#   www.voltgrid.com     -> 127.0.0.1:8080 (WordPress container from wordpress-pv)
+#   billing.voltgrid.com -> 127.0.0.1:5000 (Flask + gunicorn from billing_site)
+# So both public names arrive at 75.21.1.1 → 172.16.8.5 and get sorted out
+# by the Host header at nginx.
+#
+# global_dns_records in group_vars/all.yml points www.voltgrid.com and
+# billing.voltgrid.com at 75.21.1.1 so external clients can resolve them.
+#
+# associated_rule: pass tells pfSense to auto-create the matching filter
+# rule on WAN_ISP so the DNATted traffic isn't blocked by default-deny.
+pfsense_nat_rules:
+  - descr: "HTTP  → pp-www (voltgrid.com public web + billing)"
+    interface_descr: "WAN_ISP"
+    protocol: "tcp"
+    destination_port: 80
+    target: "172.16.8.5"
+    local_port: 80
+    associated_rule: "pass"
+  - descr: "HTTPS → pp-www (voltgrid.com public web + billing)"
+    interface_descr: "WAN_ISP"
+    protocol: "tcp"
+    destination_port: 443
+    target: "172.16.8.5"
+    local_port: 443
+    associated_rule: "pass"

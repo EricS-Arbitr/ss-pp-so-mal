@@ -1,0 +1,131 @@
+/* ============================================================
+ * Voltgrid Power Co. — brand styles
+ * Shares the palette with billing.voltgrid.com for consistency.
+ * ============================================================ */
+
+:root {
+  --vg-primary:    #0a4d8c;
+  --vg-primary-2:  #0d6cc4;
+  --vg-accent:     #f4a01e;
+  --vg-bg-soft:    #f4f6fa;
+  --vg-fg:         #1d2a3a;
+  --vg-muted:      #6b7c93;
+  --vg-line:       #d9dee8;
+}
+
+/* ---- Typography polish ------------------------------------------------- */
+body {
+  color: var(--vg-fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  line-height: 1.6;
+}
+.wp-block-heading {
+  color: var(--vg-primary);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+h1.wp-block-heading { font-size: clamp(2rem, 4.5vw, 3rem); }
+h2.wp-block-heading { font-size: clamp(1.5rem, 3vw, 2.25rem); margin-top: 1.5em; }
+h3.wp-block-heading { font-size: 1.25rem; }
+
+/* Heading colour gets inverted inside cover blocks (white on dark hero) */
+.wp-block-cover .wp-block-heading,
+.wp-block-cover p { color: #ffffff !important; }
+
+/* ---- Hero cover -------------------------------------------------------- */
+.vg-hero {
+  background: linear-gradient(135deg, #0a4d8c 0%, #1a6cb4 55%, #f4a01e 100%);
+  position: relative;
+  overflow: hidden;
+}
+.vg-hero::before {
+  /* Subtle circuit-style grid pattern overlay */
+  content: "";
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+}
+.vg-hero > * { position: relative; z-index: 1; }
+
+/* ---- Buttons ----------------------------------------------------------- */
+.wp-block-button .wp-block-button__link {
+  background-color: var(--vg-accent);
+  color: #ffffff;
+  font-weight: 600;
+  padding: 0.7rem 1.4rem;
+  border-radius: 6px;
+  transition: background-color .15s ease;
+}
+.wp-block-button .wp-block-button__link:hover { background-color: #d88812; }
+.wp-block-button.is-style-outline .wp-block-button__link {
+  background-color: transparent;
+  color: #ffffff;
+  border: 2px solid #ffffff;
+}
+.wp-block-button.is-style-outline .wp-block-button__link:hover {
+  background-color: rgba(255,255,255,0.15);
+}
+
+/* ---- Feature columns / card sections ---------------------------------- */
+.vg-features { padding: 3rem 0; }
+.vg-features .wp-block-column {
+  background: #ffffff;
+  border: 1px solid var(--vg-line);
+  border-radius: 10px;
+  padding: 1.5rem;
+  box-shadow: 0 2px 8px rgba(10,77,140,0.06);
+}
+.vg-features .wp-block-column h3 { margin-top: 0; }
+.vg-features svg { width: 48px; height: 48px; margin-bottom: 0.5rem; }
+
+/* ---- Stat band --------------------------------------------------------- */
+.vg-stats {
+  background: var(--vg-primary);
+  color: #ffffff;
+  padding: 2.5rem 1rem;
+  border-radius: 10px;
+}
+.vg-stats .wp-block-heading,
+.vg-stats p { color: #ffffff !important; }
+.vg-stat-number {
+  display: block;
+  font-size: 2.5rem;
+  font-weight: 700;
+  color: var(--vg-accent);
+  line-height: 1;
+}
+.vg-stat-label {
+  display: block;
+  font-size: 0.85rem;
+  color: rgba(255,255,255,0.8);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-top: 0.25rem;
+}
+
+/* ---- Township / generation cards (coverage page) ---------------------- */
+.vg-township {
+  border-left: 4px solid var(--vg-accent);
+  padding: 0.75rem 1rem;
+  background: var(--vg-bg-soft);
+  border-radius: 0 6px 6px 0;
+  margin-bottom: 0.75rem;
+}
+.vg-township strong { color: var(--vg-primary); }
+
+/* ---- Soft section background ------------------------------------------ */
+.vg-band-soft {
+  background: var(--vg-bg-soft);
+  padding: 3rem 1.5rem;
+  border-radius: 10px;
+}
+
+/* ---- Misc tightenings ------------------------------------------------- */
+.wp-block-list li { margin-bottom: 0.35rem; }
+a { color: var(--vg-primary-2); }
+a:hover { color: var(--vg-primary); }
+hr.wp-block-separator { border-color: var(--vg-line); margin: 2.5rem 0; }

@@ -1,0 +1,101 @@
+ansible_host: "10.255.240.199"
+
+# SimSpace provisions: eth0 = first data-plane (shared with mgmt 10.255.240.199/20)
+network_interfaces:
+  - name: "eth0"                      # PP-Services gateway (mgmt shares)
+    ipv4:
+      address: "172.16.2.1"
+      netmask: "255.255.255.0"
+      type: "ethernet"
+      ospf: true
+  - name: "eth1"                      # PP-Business-Processing-Department gateway
+    ipv4:
+      address: "172.16.3.1"
+      netmask: "255.255.255.0"
+      type: "ethernet"
+      ospf: true
+  - name: "eth2"                      # PP-Eng-Department gateway
+    ipv4:
+      address: "172.16.4.1"
+      netmask: "255.255.255.0"
+      type: "ethernet"
+      ospf: true
+  - name: "eth3"                      # PP-LS-Department gateway
+    ipv4:
+      address: "172.16.5.1"
+      netmask: "255.255.255.0"
+      type: "ethernet"
+      ospf: true
+  - name: "eth4"                      # PP-IS-Department gateway
+    ipv4:
+      address: "172.16.6.1"
+      netmask: "255.255.255.0"
+      type: "ethernet"
+      ospf: true
+  - name: "eth5"                      # switch-10 transit to pp-internal-router
+    ipv4:
+      address: "172.16.0.42"
+      netmask: "255.255.255.252"
+      type: "ethernet"
+      ospf: true
+
+static_route:
+  route: "0.0.0.0/0"
+  next_hop: "172.16.0.41"             # pp-internal-router (default chain toward pp-isp-router/is-inet)
+
+# SimSpace's VyOS image bakes a `0.0.0.0/0` for each of this host's /24
+# interface IPs (eth0-eth4 = .2.1/.3.1/.4.1/.5.1/.6.1). Same self-loop
+# pattern as pp-internal-router and pp-isp-router — strip so only the real
+# default (0.0.0.0/0 → 172.16.0.41 pp-internal-router) remains.
+# See UPSTREAM_FIXES.md (2026-05-27 entry).
+extra_static_routes_remove:
+  - network: "0.0.0.0/0"
+    next_hop: "172.16.2.1"            # own eth0 IP (self-loop)
+  - network: "0.0.0.0/0"
+    next_hop: "172.16.3.1"            # own eth1 IP (self-loop)
+  - network: "0.0.0.0/0"
+    next_hop: "172.16.4.1"            # own eth2 IP (self-loop)
+  - network: "0.0.0.0/0"
+    next_hop: "172.16.5.1"            # own eth3 IP (self-loop)
+  - network: "0.0.0.0/0"
+    next_hop: "172.16.6.1"            # own eth4 IP (self-loop)
+
+# Architectural shift 2026-06-10: iBGP removed. Corp IGP is OSPF area 0
+# (enabled via `ospf: true` on every interface above — corp /24s + transit
+# /30). The overlay's "Remove stale VyOS iBGP" play strips legacy
+# `set protocols bgp` config from this router.
+remove_vyos_bgp: true
+
+# --- Security Onion GRE mirror → so-sensor-corp -------------------------
+# Mirrors the five corporate department interfaces into a GRE tunnel
+# terminating on so-sensor-corp (172.16.9.40). Path crosses NO firewall
+# (corp-router → pp-internal-router → pp-security), so no pfSense rule is
+# needed for this one.
+#
+# eth5 (switch-10 transit) is deliberately excluded — mirroring transit
+# duplicates what the department interfaces already carry.
+#
+# ⚠ eth0 SHARES THE MGMT IP (10.255.240.199) with the PP-Services gateway.
+# Mirroring it therefore also captures mgmt-plane traffic — every Ansible
+# SSH/WinRM session to every corp host. Verify on the live device before
+# enabling; if the noise is unacceptable, drop eth0 and lose PP-Services
+# (pp-dc01/02, pp-sql, pp-file, pp-mail) visibility, or add a tc filter.
+vyos_mirror_source_interfaces:
+  - eth0   # PP-Services      172.16.2.0/24  (⚠ shares mgmt — see above)
+  - eth1   # BP               172.16.3.0/24
+  - eth2   # Engineering      172.16.4.0/24
+  - eth3   # Legal Staff      172.16.5.0/24
+  - eth4   # InfoSec          172.16.6.0/24
+
+vyos_gre_source_ip: "172.16.0.42"      # eth5, routes to pp-security
+vyos_gre_remote_ip: "172.16.9.40"      # so-sensor-corp
+vyos_gre_local_addr: "10.100.1.1"
+vyos_gre_remote_addr: "10.100.1.2"
+vyos_gre_tunnel_prefix: 30
+
+# Do NOT mirror management-plane traffic. eth0 on this router shares the mgmt
+# IP with a data-plane gateway, so a bare matchall mirror would copy every
+# Ansible SSH/WinRM session into the sensor. Rendered by vyos_mirror as tc
+# `action pass` filters ahead of the catch-all, matching src and dst.
+vyos_mirror_exclude_cidrs:
+  - "10.255.240.0/20"

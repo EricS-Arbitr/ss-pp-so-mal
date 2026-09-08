@@ -1,0 +1,341 @@
+---
+# =========================================================================
+# 60-verify.yml — end-to-end verification of the SO deploy
+# =========================================================================
+# Cheap checks: so-status on manager, /_cluster/health on search,
+# suricata + zeek running on sensor, GRE tunnel up on both ends, packets
+# flowing (tcpdump packet count > 0 in a 5-sec window on sensor's tun0).
+#
+# Actual pass/fail thresholds + output formatting live in verify_so.sh
+# (top-level script) which this playbook invokes as its final check.
+# =========================================================================
+
+- name: SO manager status
+  hosts: so_manager
+  become: true
+  gather_facts: false
+  tasks:
+    - name: so-status
+      ansible.builtin.command: sudo so-status
+      changed_when: false
+      register: so_status_out
+    - name: report
+      ansible.builtin.debug:
+        msg: "{{ so_status_out.stdout_lines[-20:] }}"
+  tags:
+    - so
+    - so_verify
+- name: Elastic cluster health (query from manager; so-elasticsearch-query is manager-only, and cluster health is a whole-cluster metric anyway)
+  hosts: so_manager
+  become: true
+  gather_facts: false
+  tasks:
+    - name: elastic cluster health
+      ansible.builtin.command: sudo so-elasticsearch-query _cluster/health?pretty
+      changed_when: false
+      register: es_health_out
+    - name: report
+      ansible.builtin.debug:
+        msg: "{{ es_health_out.stdout }}"
+
+# Every sensor gets its own end-to-end proof. Traffic targets live in each
+# sensor's host_vars as `so_verify_mirror_targets`, because which addresses
+# force a router to forward out a MIRRORED interface is a per-router fact.
+#
+# Coverage is deliberately partial and that is fine: each sensor's targets
+# exercise one or two of its router's mirrored interfaces, which is enough to
+# prove the whole chain (tc mirred -> GRE encap -> route to sensor -> firewall
+# -> kernel decap -> tun0). It does NOT prove every mirrored interface on
+# every router. Do not read a pass as full coverage.
+  tags:
+    - so
+    - so_verify
+- name: SO sensor pcap flow rate — all three sensors
+  hosts: so_sensor
+  become: true
+  gather_facts: false
+  tasks:
+    # On an idle range a passive tcpdump reports 0 packets even though the
+    # GRE mirror is fully functional -- which is exactly what so_sensor's
+    # inline check reports at install time. Generate a burst of ICMP first.
+    #
+    # BUG FIXED 2026-07-29: this previously pinged the .1 GATEWAY IPs, which
+    # generates NO mirrorable traffic at all. Those are the router's own
+    # addresses, so packets are locally delivered on the interface they
+    # arrive on and never egress a mirrored interface, where the
+    # `tc ... action mirred egress mirror` rules live. The check reported
+    # "0 packets captured" against a perfectly working mirror and masked a
+    # real GRE firewall bug for several deploy cycles. See PORTING_GUIDE 9.10.
+    #
+    # Targets must be addresses ON a mirrored subnet. Unresponsive targets are
+    # fine -- the router still ARPs out that interface and ARP frames are
+    # mirrored too (confirmed: gre-proto-0x806 seen encapsulated on the wire).
+    - name: Fail early if this sensor has no mirror targets defined
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} has no so_verify_mirror_targets in host_vars.
+          Without targets the tcpdump below would report 0 packets and fail for
+          the wrong reason. Add addresses that sit ON one of this sensor's
+          mirrored subnets -- never a router's own .1 address.
+      when: so_verify_mirror_targets | default([]) | length == 0
+
+    - name: Generate mirror-able traffic toward this sensor's subnets (background)
+      ansible.builtin.shell: |
+        for tgt in {{ so_verify_mirror_targets | join(' ') }}; do
+          ping -c 10 -i 0.5 -W 1 -q -n "$tgt" &
+        done
+        wait
+      delegate_to: "{{ groups['so_manager'][0] }}"
+      async: 30
+      poll: 0
+      changed_when: false
+      register: traffic_gen
+
+    - name: 15-sec tcpdump on monitor interface — packet count > 0 means GRE mirror is delivering
+      # PARSE THE NUMBER, DO NOT MATCH A PHRASE. This check has now been wrong
+      # in BOTH directions, and the token form is the only one that is wrong in
+      # neither.
+      #
+      #   v1  failed_when: "'0 packets captured' in pcap_out.stdout"
+      #       Substring. "100 packets captured" CONTAINS "0 packets captured",
+      #       so it failed precisely when the mirror was working -- PowerPlant
+      #       2026-08-04, all three sensors at 100 packets.
+      #
+      #   v2  failed_when: "'0 packets captured' in pcap_out.stdout_lines"
+      #       Exact line match, which cured that -- and FAILS OPEN. It fails
+      #       only on that one literal, so tcpdump erroring, the interface
+      #       being absent, or the wording changing all leave the string
+      #       missing, and a missing string meant PASS. The primary "is the
+      #       mirror delivering" check passed whenever it could not measure.
+      #       Found by the verification audit, 2026-09-04.
+      #
+      #   v3  the command emits its own token from the parsed count. Absence of
+      #       PCAP_OK is a failure whatever the cause, and no phrase is ever
+      #       compared against another phrase.
+      ansible.builtin.shell: |
+        out=$(timeout 15 tcpdump -i {{ so_monitor_interface }} -c 100 -nn 2>&1)
+        printf '%s\n' "$out" | tail -5
+        n=$(printf '%s\n' "$out" | grep -oE '[0-9]+ packets captured' | grep -oE '^[0-9]+' | head -1)
+        if [ -n "$n" ] && [ "$n" -gt 0 ]; then
+          echo "PCAP_OK_$n"
+        else
+          echo "PCAP_NONE_${n:-noreading}"
+        fi
+      changed_when: false
+      register: pcap_out
+      failed_when: "'PCAP_OK_' not in pcap_out.stdout"
+
+    - name: report
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} via {{ so_verify_mirror_targets | join(', ') }}: {{ pcap_out.stdout }}"
+
+    # PACKETS ARRIVING IS NOT THE OUTCOME. It is the transport.
+    #
+    # Every check above this line passed for 42 hours while Zeek produced 66
+    # connection records in its entire lifetime and 23.5M packets arrived.
+    # The mirror was perfect; AF_PACKET could not parse an L3 gre tunnel's
+    # cooked frames and discarded 100% of them. Suricata reads cooked capture
+    # natively, so alerting worked and nothing looked wrong.
+    #
+    # Zeek's own counter is the honest signal -- it reports what it RECEIVED
+    # versus what it PROCESSED, and a high "not processed" percentage is the
+    # exact fingerprint of a capture/link-type mismatch.
+    - name: Zeek must be PROCESSING the mirror, not just receiving it
+      ansible.builtin.shell: |
+        set -o pipefail
+        f=/nsm/zeek/logs/current/conn.log
+        before=$(grep -vc '^#' "$f" 2>/dev/null || echo 0)
+        sleep 45
+        after=$(grep -vc '^#' "$f" 2>/dev/null || echo 0)
+        if [ "$after" -gt "$before" ]; then
+          echo "GROWING before=$before after=$after"
+        else
+          echo "STALLED before=$before after=$after"
+        fi
+      args:
+        executable: /bin/bash
+      register: zeek_conn
+      changed_when: false
+      failed_when: false
+      # The comparison happens IN BASH and Ansible only looks for a word.
+      # The first version compared two regex_search captures in a `until:`
+      # conditional, which failed on the controller with "Unknown argument"
+      # -- backslash handling differs between a YAML folded scalar and the
+      # double-quoted scalar it was tested in. Numbers extracted by Jinja
+      # across two escaping layers is a fragile way to ask "is it bigger".
+      until: "'GROWING' in zeek_conn.stdout"
+      retries: 4
+      delay: 20
+
+    - name: Fail if Zeek is receiving packets but logging no connections
+      ansible.builtin.fail:
+        msg: |
+          {{ inventory_hostname }}: conn.log is not growing
+          ({{ zeek_conn.stdout | default('no reading') | trim }}).
+
+          Packets ARE arriving -- the tcpdump above proved it. Zeek is
+          receiving them and producing nothing, which is a capture or
+          link-type mismatch, not a mirroring fault:
+
+            sudo tail -3 /nsm/zeek/spool/worker-1-1/stdout.log
+              -> "N packets received, M (100.00%) not processed" is the
+                 fingerprint. Near 100% means the capture method cannot read
+                 this interface's frames.
+
+            ip -d link show {{ so_monitor_interface }}
+              -> must report `gretap`. A plain `gre` device carries no
+                 Ethernet header, and SO runs Zeek as
+                 `-i af_packet::{{ so_monitor_interface }}`, which requires
+                 one. That combination discards 100% of frames silently.
+
+          Suricata is NOT evidence here -- it reads cooked capture natively
+          and keeps alerting while Zeek sees nothing.
+      when: "'GROWING' not in (zeek_conn.stdout | default(''))"
+
+    # --- FIDELITY, not just presence -----------------------------------
+    # Everything above this point asks "is the mirror delivering ANYTHING".
+    # Both checks below ask "is it delivering the traffic that MATTERS", and
+    # both would have caught a defect that sat undetected from the day the
+    # range was built.
+    #
+    # ss-pp-so 2026-09-03: mirrored full-size frames need 1538 bytes of
+    # underlay after GRE encapsulation and the underlay is 1500, so the
+    # tunnel silently dropped every one. Zeek logged connections, so-status
+    # was green, tcpdump on tun0 showed packets, conn.log grew -- and
+    # response_body_len was 0 for every HTTP download, files.log was empty,
+    # and Strelka had analysed nothing in 24 hours. capture_loss had been
+    # reporting ~50% the entire time and nothing read it.
+
+    # SAMPLE SIZE FIRST, RATIO SECOND.
+    #
+    # The first version of this read `percent_lost` directly and took the MAX
+    # of the last five entries. On a freshly built range that produced 31.6%,
+    # 25.0% and 58.3% -- ratios like 6/19 and 3/12, computed before the range
+    # carried any real traffic -- and failed a deploy in which every other one
+    # of 65 hosts succeeded. A percentage over a handful of ACKs is noise, and
+    # taking the maximum of five noisy samples is worse than taking one.
+    #
+    # Sum gaps and acks across recent entries and report BOTH, so the reader
+    # can see what the ratio is made of.
+    - name: Read Zeek's capture_loss together with its sample size
+      ansible.builtin.shell: |
+        set -o pipefail
+        f=/nsm/zeek/logs/current/capture_loss.log
+        g=$(grep -o '"gaps":[0-9]*' "$f" 2>/dev/null | tail -20 | cut -d: -f2 | awk '{s+=$1} END {print s+0}')
+        a=$(grep -o '"acks":[0-9]*' "$f" 2>/dev/null | tail -20 | cut -d: -f2 | awk '{s+=$1} END {print s+0}')
+        echo "$g $a"
+      args:
+        executable: /bin/bash
+      register: cap_loss
+      changed_when: false
+      failed_when: false
+
+    - name: Derive the loss ratio
+      ansible.builtin.set_fact:
+        cl_gaps: "{{ (cap_loss.stdout | default('0 0') | trim).split()[0] | int }}"
+        cl_acks: "{{ (cap_loss.stdout | default('0 0') | trim).split()[1] | int }}"
+
+    - name: Report capture loss with its denominator
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: capture_loss
+          {{ (100.0 * (cl_gaps | int) / (cl_acks | int)) | round(1) if (cl_acks | int) > 0 else 0 }}%
+          ({{ cl_gaps }} gaps / {{ cl_acks }} acks){{ '  [SAMPLE TOO SMALL TO JUDGE]'
+          if (cl_acks | int) < (so_capture_loss_min_acks | int) else '' }}
+
+    # WARNING BY DEFAULT, NOT FATAL -- and that is a deliberate scoping choice,
+    # not timidity.
+    #
+    # The loss this detects is a KNOWN, UNRESOLVED constraint: roughly 16% of
+    # mirrored packets disappear between the router transmitting and the sensor
+    # receiving, with no counter on either end reporting a drop. The underlay is
+    # clean at 1478 bytes and up to ~850 pps, so the leading explanation is
+    # burst drops inside the hypervisor vSwitch, invisible to Linux. Until that
+    # is solved, failing the deploy on it blocks a range that is otherwise
+    # entirely healthy -- which is exactly what happened on 2026-09-04, after a
+    # 5h56m run in which all 65 other hosts succeeded.
+    #
+    # Set so_capture_loss_fatal: true once the mirror loss is actually fixed,
+    # so this becomes a regression gate rather than a standing complaint.
+    - name: Capture loss exceeds the threshold
+      ansible.builtin.debug:
+        msg: |
+          {{ 'ERROR' if (so_capture_loss_fatal | bool) else 'WARNING' }}
+          {{ inventory_hostname }}: capture_loss
+          {{ (100.0 * (cl_gaps | int) / (cl_acks | int)) | round(1) }}%
+          over {{ cl_acks }} acks (threshold {{ so_capture_loss_max }}%).
+
+          Zeek sees connections but not all of their bytes. Modest packet loss
+          is catastrophic for file reconstruction -- one missing segment opens
+          a gap and everything after it counts as missing until Zeek resyncs,
+          so ~16% packet loss produced ~64% missing file bytes here. No file is
+          ever complete, so nothing is extracted and Strelka stays idle no
+          matter how much traffic flows.
+
+          Check, in order:
+            1. tc mirror present on EVERY source interface --
+               `tc filter show dev <iface> ingress | grep -c mirred`.
+               Reconfiguring an interface flushes the ingress qdisc and takes
+               the mirror with it.
+            2. tunnel TX errors -- `show interfaces tunnel {{ so_monitor_interface }}`
+               on the router. A climbing count means frames too large for the
+               tunnel; the MSS clamp in vyos_mirror should prevent that.
+            3. burst loss in the virtual switch, which appears in NO Linux
+               counter on either end. Compare tx_packets on the router's tunnel
+               against rx_packets on the sensor's across one transfer.
+
+          KNOWN OPEN as of 2026-09-04 -- see roles/vyos_mirror/defaults/main.yml.
+      when:
+        - (cl_acks | int) >= (so_capture_loss_min_acks | int)
+        - (100.0 * (cl_gaps | int) / (cl_acks | int)) > (so_capture_loss_max | float)
+
+    - name: Fail on capture loss (only when explicitly made fatal)
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }}: capture_loss
+          {{ (100.0 * (cl_gaps | int) / (cl_acks | int)) | round(1) }}% over
+          {{ cl_acks }} acks exceeds {{ so_capture_loss_max }}%. Detail above.
+      when:
+        - so_capture_loss_fatal | bool
+        - (cl_acks | int) >= (so_capture_loss_min_acks | int)
+        - (100.0 * (cl_gaps | int) / (cl_acks | int)) > (so_capture_loss_max | float)
+
+    - name: Are FULL-SIZE frames arriving, or only the small ones?
+      ansible.builtin.shell: |
+        set -o pipefail
+        timeout 20 tcpdump -i {{ so_monitor_interface }} -nn greater 1400 2>&1 \
+          | grep -o '[0-9]* packets captured' | head -1 | cut -d' ' -f1
+      args:
+        executable: /bin/bash
+      register: big_frames
+      changed_when: false
+      failed_when: false
+
+    - name: Report full-size frame count
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ big_frames.stdout | default('0') | trim }}
+          frames >1400 bytes in 20s on {{ so_monitor_interface }}
+
+    # Deliberately a WARNING, not a failure. A genuinely idle segment can
+    # legitimately carry no large frames in a 20-second window, so failing on
+    # zero would fire on quiet ranges. Zero here alongside a capture_loss
+    # failure above is the fingerprint of the MTU defect; zero on its own
+    # means look at whether anything is transferring at all.
+    - name: Warn if no full-size frames were seen
+      ansible.builtin.debug:
+        msg: |
+          WARNING {{ inventory_hostname }}: zero frames >1400 bytes on
+          {{ so_monitor_interface }} in 20s.
+
+          On an active segment this is the signature of a tunnel that cannot
+          carry full-size frames -- the exact defect that made file extraction
+          impossible on this range. Payloads travel in full-size frames; if
+          none arrive, Zeek sees control traffic and never a file.
+
+          Confirm with a real transfer before acting: a quiet segment produces
+          the same reading. See vyos_mirror/defaults/main.yml.
+      when: (big_frames.stdout | default('0') | trim | int) == 0
+  tags:
+    - so
+    - so_verify

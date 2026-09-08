@@ -1,0 +1,69 @@
+---
+# vyos_mirror defaults
+
+# Path where we install the tc-mirror boot script. VyOS runs this on every
+# boot after config load (canonical hook).
+vyos_mirror_script_path: "/config/scripts/vyatta-postconfig-bootup.script"
+
+# Where the current tc mirror config gets fingerprinted so re-runs are cheap.
+vyos_mirror_marker: "/config/scripts/.so-mirror-fingerprint"
+
+# Tunnel interface name (must not collide with existing tun0 use on router).
+vyos_gre_tunnel_iface: "tun0"
+
+# --- Full-frame capture over a 1500-byte underlay -------------------------
+# ss-pp-so 2026-09-03/04. `tc mirred` copies COMPLETE Ethernet frames, so a
+# mirrored full-size frame is 1514 bytes and needs 1514 + 4 (GRE) + 20 (outer
+# IP) = 1538 bytes on the wire. The underlay is 1500. The gretap tunnel
+# therefore refused every full-size frame and counted a TX error -- 12% of all
+# mirrored packets, and 100% of the packets that carry file payloads.
+#
+# Measured on the live range before the fix: Zeek reported
+# `response_body_len: 0` for a 200 KB HTTP download, files.log had no entry at
+# all, capture_loss sat at ~50%, and Strelka had analysed zero files in 24
+# hours. Every existing check passed throughout -- so-status green, packets
+# arriving on tun0, conn.log populated.
+#
+# TWO OTHER FIXES WERE TRIED AND MEASURED TO FAIL, do not re-attempt them:
+#   * `parameters ip no-pmtu-discovery` (+ the `ttl 0` it requires). Confirmed
+#     set at the kernel level -- `ip -d link` showed `nopmtudisc` -- and the
+#     tunnel still dropped oversized frames at exactly the rate they arrived,
+#     emitting zero IP fragments. gretap will not fragment an Ethernet frame;
+#     there is no ICMP to return for one, so it discards silently.
+#   * Raising the underlay MTU. The platform's vSwitch passes 9000 fine
+#     (verified with an 8972-byte ping between two hosts on one segment), but
+#     the GRE crosses up to five routed hops over OSPF transit links, where an
+#     MTU mismatch breaks adjacency. Correct in principle, wrong blast radius.
+#
+# WHAT WORKS: clamp TCP MSS on the mirrored interfaces so segments never grow
+# into a frame the tunnel cannot carry.
+#   outer <= 1500  ->  inner frame <= 1476  ->  inner IP <= 1462
+#   inner IP = 20 (IP) + 32 (TCP with timestamps) + MSS  ->  MSS <= 1410
+# 1400 leaves ~10 bytes of margin, enough to absorb a VLAN tag.
+#
+# Result on the range: response_body_len 0 -> 200195, files.log populated with
+# mime_type and SHA1/MD5, tunnel TX errors 12% -> zero, capture_loss 50% ->
+# 37%. Non-TCP frames above 1462 are still dropped; on this range that is
+# effectively nothing (DNS is small, no NFS/TFTP bulk).
+vyos_mirror_adjust_mss: 1400
+
+# Tunnel device MTU. 1500 rather than the kernel's gretap default so a full
+# 1514-byte frame is accepted by the device; it also means the tunnel is
+# already correct should the underlay ever gain headroom. Frames that still do
+# not fit are dropped either way -- this changes where, not whether.
+vyos_mirror_tunnel_mtu: 1500
+
+# so_capture_loss_max lives in group_vars/all/, NOT here.
+# It is consumed by playbooks/60-verify.yml, which targets [so_sensor] and does
+# not include this role -- a role default would resolve during a local lint and
+# be undefined on the range. ss-pp-so's verify_vars.py caught exactly that when
+# this was first written here. One source of truth, in group_vars/all/.
+
+# CIDRs to EXCLUDE from mirroring. Rendered as tc `action pass` filters at a
+# lower priority than the catch-all, matching both src and dst.
+#
+# Empty by default — in the so-ansible dev range mgmt is a separate NIC that
+# is simply not in vyos_mirror_source_interfaces, so nothing needs excluding.
+# Set it where the mgmt IP SHARES a mirrored data interface, which is the case
+# on PowerPlant's routers (see ss-pp-ab host_vars/pp-*-router.yml).
+vyos_mirror_exclude_cidrs: []

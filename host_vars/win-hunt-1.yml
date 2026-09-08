@@ -1,0 +1,21 @@
+ansible_host: 10.255.240.177
+network_interfaces:
+  - name: "Ethernet0"
+    ipv4:
+      address: "10.255.240.177"
+      netmask: "255.255.240.0"
+      gateway: ""
+  - name: "Ethernet1"
+    ipv4:
+      address: "172.16.9.11"
+      netmask: "255.255.255.0"
+      gateway: "172.16.9.1"
+    dns:
+      - "172.16.2.7"
+
+# Autologin identity. The `configure hunt` play applies the autologin role,
+# which is gated on `logon_user is defined` -- without these it has always
+# been a silent no-op on the hunt boxes. DefaultDomainName resolves from
+# `domain_name`, which these hosts now get via [voltgrid].
+logon_user: "marcus.reed"
+logon_user_password: "Simspace1!Simspace1!"

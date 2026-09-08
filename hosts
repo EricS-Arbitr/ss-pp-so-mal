@@ -1,0 +1,577 @@
+# ============================================================
+# PowerPlant Ansible Inventory
+# ============================================================
+
+# ------------------------------------------------------------
+# Corporate IT Workstations
+# ------------------------------------------------------------
+[business_processing]
+pp-bp-wkstn-1
+pp-bp-wkstn-2
+pp-bp-wkstn-3
+pp-bp-wkstn-4
+pp-bp-wkstn-5
+pp-bp-wkstn-6
+pp-bp-wkstn-7
+pp-bp-wkstn-8
+
+[engineering]
+pp-eng-wkstn-1
+pp-eng-wkstn-2
+pp-eng-wkstn-3
+pp-eng-wkstn-4
+pp-eng-wkstn-5
+pp-eng-wkstn-6
+pp-eng-wkstn-7
+pp-eng-wkstn-8
+
+[legal_staff]
+pp-ls-wkstn-1
+pp-ls-wkstn-2
+pp-ls-wkstn-3
+pp-ls-wkstn-4
+pp-ls-wkstn-5
+pp-ls-wkstn-6
+
+[infosec]
+pp-is-wkstn-1
+pp-is-wkstn-2
+pp-is-wkstn-3
+pp-is-wkstn-4
+
+# OT control workstations — live on the new 192.168.100.0/24 OT subnet,
+# domain-joined, use pp-dc03 (192.168.100.5) as primary DNS.
+[ot_control]
+pp-ctl-wks-01
+pp-ctl-wks-02
+pp-ctl-wks-03
+pp-ctl-wks-04
+
+[workstations:children]
+business_processing
+engineering
+legal_staff
+infosec
+ot_control
+
+# ------------------------------------------------------------
+# Corporate Servers
+# ------------------------------------------------------------
+[domain_controllers]
+pp-dc01
+pp-dc02
+pp-dc03
+
+[pdc]
+pp-dc01
+
+[additional_dc]
+pp-dc02
+pp-dc03
+
+[corporate_servers]
+pp-file
+pp-mail
+pp-sql
+pp-syslog
+
+# OT-side servers — on the 192.168.100.0/24 OT subnet behind pp-ot-router.
+# Domain-joined; auth/DNS goes to pp-dc03 (local OT DC) with pp-dc01 fallback.
+[ot_servers]
+pp-dcs-ctrl
+
+[file]
+pp-file
+
+[global_dns]
+is-inet
+
+[trafficgen]
+is-inet
+
+[email]
+is-inet
+
+# Windows hosts that join the voltgrid.com domain
+[members]
+# SOC hunt/analyst workstations. Added to [members] 2026-08-17 so analysts
+# sign in with domain credentials rather than a local account -- win-hunt-1
+# had never been joined. [members] is what the `Join Domain` play targets.
+pp-bp-wkstn-1
+pp-bp-wkstn-2
+pp-bp-wkstn-3
+pp-bp-wkstn-4
+pp-bp-wkstn-5
+pp-bp-wkstn-6
+pp-bp-wkstn-7
+pp-bp-wkstn-8
+pp-eng-wkstn-1
+pp-eng-wkstn-2
+pp-eng-wkstn-3
+pp-eng-wkstn-4
+pp-eng-wkstn-5
+pp-eng-wkstn-6
+pp-eng-wkstn-7
+pp-eng-wkstn-8
+pp-ls-wkstn-1
+pp-ls-wkstn-2
+pp-ls-wkstn-3
+pp-ls-wkstn-4
+pp-ls-wkstn-5
+pp-ls-wkstn-6
+pp-is-wkstn-1
+pp-is-wkstn-2
+pp-is-wkstn-3
+pp-is-wkstn-4
+pp-file
+pp-mail
+# OT-side domain members (blueprint 145). Per host_vars comments each of
+# these is a "Domain-joined member of voltgrid.com" whose primary DNS is
+# pp-dc03 (the OT-side additional DC at 192.168.100.5) with pp-dc01 as
+# the cross-ESP fallback. Missing from [members] was the reason
+# --tags domain_member_retry never fired against them post-blueprint-145.
+pp-dcs-ctrl
+pp-ctl-wks-01
+pp-ctl-wks-02
+pp-ctl-wks-03
+pp-ctl-wks-04
+pp-sql
+pp-dcs-ctrl
+pp-ctl-wks-01
+pp-ctl-wks-02
+pp-ctl-wks-03
+pp-ctl-wks-04
+win-hunt-1
+win-hunt-2
+win-hunt-3
+win-hunt-4
+win-hunt-5
+win-hunt-6
+
+# is-inet is added as a direct member (NOT via :children) so it inherits
+# `DomainUsers` from group_vars/voltgrid.yml -- the `email` role loops
+# that list to provision mailboxes at mail.voltgrid.com. Matches how
+# range-development-ansible puts is-inet directly in [site] for the same
+# reason. is-inet still stays out of [windows]/[linux] baseline groups
+# (per CLAUDE.md), so common role doesn't run against it. The other
+# voltgrid.yml vars (domain_name, proxy_server, etc.) are harmless on
+# is-inet -- no play targeting is-inet consumes them.
+[voltgrid]
+is-inet
+# SOC hunt/analyst workstations. voltgrid.yml is where `domain_name` lives, and
+# BOTH the domain join and autologin's DefaultDomainName need it -- every other
+# [members] host reaches this group via [voltgrid:children], but the hunt boxes
+# are in none of those children, so they must be listed directly.
+win-hunt-1
+win-hunt-2
+win-hunt-3
+win-hunt-4
+win-hunt-5
+win-hunt-6
+
+[voltgrid:children]
+workstations
+domain_controllers
+corporate_servers
+ot_servers
+
+# ------------------------------------------------------------
+# OT — new gas-turbine simulation hosts (hard-coded, no mgmt interface)
+# ------------------------------------------------------------
+[ot_devices]
+pp-gas-sim
+pp-gasplant-plc
+pp-gasvibsens
+pp-ot-hist
+pp-engws
+
+# ------------------------------------------------------------
+# DMZ
+# ------------------------------------------------------------
+[dmz]
+pp-www
+pp-dmz-dns
+pp-dmz-smtp
+
+[wordpress-pv]
+pp-www
+
+# ------------------------------------------------------------
+# All servers (corporate + OT)
+# ------------------------------------------------------------
+[servers:children]
+domain_controllers
+corporate_servers
+ot_servers
+
+# ------------------------------------------------------------
+# Windows OS groups
+# ------------------------------------------------------------
+[win10]
+pp-bp-wkstn-1
+pp-bp-wkstn-2
+pp-bp-wkstn-3
+pp-bp-wkstn-4
+pp-ls-wkstn-1
+pp-ls-wkstn-2
+pp-ls-wkstn-3
+pp-is-wkstn-1
+pp-ctl-wks-01
+pp-ctl-wks-02
+pp-ctl-wks-03
+pp-ctl-wks-04
+win-hunt-1
+win-hunt-2
+win-hunt-3
+win-hunt-4
+win-hunt-5
+win-hunt-6
+pp-eng-wkstn-1
+pp-eng-wkstn-2
+pp-eng-wkstn-3
+pp-eng-wkstn-4
+pp-is-wkstn-2
+
+
+[win11]
+pp-eng-wkstn-5
+pp-eng-wkstn-6
+pp-eng-wkstn-7
+pp-eng-wkstn-8
+pp-is-wkstn-3
+pp-is-wkstn-4
+pp-bp-wkstn-5
+pp-bp-wkstn-6
+pp-bp-wkstn-7
+pp-bp-wkstn-8
+pp-ls-wkstn-4
+pp-ls-wkstn-5
+pp-ls-wkstn-6
+
+
+[winserver2022]
+pp-dc01
+pp-dc02
+pp-file
+pp-sql
+pp-dcs-ctrl
+
+[winserver2019]
+pp-dmz-dns
+pp-mail
+pp-dmz-smtp
+pp-dc03
+
+[windows:children]
+win10
+win11
+winserver2022
+winserver2019
+
+# ------------------------------------------------------------
+# Linux OS groups
+# ------------------------------------------------------------
+[ubuntu22]
+pp-syslog
+pp-www
+pp-proxy
+pp-splunk
+# Security Onion nodes — same RDP_Ubuntu_Desktop_22.04.5 image as the four
+# above, so they inherit group_vars/linux.yml credentials (simspace/simspace1,
+# the SHORT form this image uses) and the `common` baseline unchanged.
+so-manager
+so-search
+so-sensor-corp
+so-sensor-ot
+so-sensor-edge
+
+[linux:children]
+ubuntu22
+
+# ------------------------------------------------------------
+# Security / hunt network (pp-security subnet)
+# ------------------------------------------------------------
+[security]
+pp-splunk
+win-hunt-1
+win-hunt-2
+win-hunt-3
+win-hunt-4
+win-hunt-5
+win-hunt-6
+so-manager
+so-search
+so-sensor-corp
+so-sensor-ot
+so-sensor-edge
+
+# ------------------------------------------------------------
+# Security Onion 2.4.x — distributed grid on pp-security
+# ------------------------------------------------------------
+# Group names are the so-ansible role contract; the roles reference them
+# literally (notably groups['so_manager'][0] for every delegated grid-join
+# task, which is why so_manager must hold EXACTLY ONE host).
+#
+# Deploy order is load-bearing: the manager must complete before search and
+# sensor can join it.
+[so_manager]
+so-manager
+
+[so_search]
+so-search
+
+# One sensor per mirrored router — see docs/security-onion/.
+#   corp → pp-corp-router   (5 corporate departments)
+#   ot   → pp-ot-router     (Gas-Turbine, -Sim, OT-Services, PP-OT-Ctrl)
+#   edge → pp-isp-router    (Internet + red-net, i.e. the attack path)
+[so_sensor]
+so-sensor-corp
+so-sensor-ot
+so-sensor-edge
+
+[so_all:children]
+so_manager
+so_search
+so_sensor
+
+# Routers that mirror traffic to a sensor via GRE + tc mirred. NOT the same
+# as [vyos] — pp-ot-router is deliberately absent from that group (its
+# RC_NG_OT_Router image rejects the vyos role's interface commands) but IS a
+# mirror source here, so vyos_mirror must be verified against that image
+# before the OT sensor can work.
+[so_mirror_routers]
+pp-corp-router
+pp-ot-router
+pp-isp-router
+
+[splunk]
+pp-splunk
+
+# Central syslog collector — receives from all Linux/VyOS/pfSense hosts,
+# then Splunk UF on this box ships /var/log/remote/* to pp-splunk.
+[syslog]
+pp-syslog
+
+
+# ------------------------------------------------------------
+# Endpoint telemetry — Sysmon
+# ------------------------------------------------------------
+# Brought in line with ss-pp-ab 2026-09-01. Previously Sysmon was applied by
+# playbooks/75-endpoint.yml with `hosts: windows`, i.e. all 45 Windows hosts
+# with no exclusions. Coverage is now an explicit group, so "does this host
+# produce endpoint telemetry" is a decision someone wrote down rather than a
+# side effect of a host pattern.
+#
+# pp-dcs-ctrl (OT control station) is EXCLUDED by decision. The line is
+# INSTRUMENT vs OBSERVE: Sysmon instruments the OS with a kernel driver and
+# process-level hooks, which does not belong on process-critical OT equipment.
+# It still forwards Windows event logs -- a forwarder only reads what Windows
+# already writes, which is ordinary practice even on an HMI.
+#
+# pp-dmz-dns and pp-dmz-smtp are also absent, matching ss-pp-ab. They are
+# outside the forest and outside the corporate telemetry contract.
+[sysmon]
+pp-file
+pp-sql
+pp-mail
+pp-dc01
+pp-dc02
+pp-dc03
+
+[sysmon:children]
+aue
+hunt
+
+
+[splunk-forwarder]
+pp-proxy
+# SOC hunt/analyst workstations. Added 2026-08-17 -- an attacker who lands on
+# an analyst box sees everything the SOC sees and can steer the
+# investigation, so these are high-value targets and belong in the SIEM.
+# Security Onion already collects their endpoint telemetry via [windows] in
+# 75-endpoint; Splunk not having them was an inconsistency rather than a
+# decision.
+#
+# DIRECT members here rather than adding them to [workstations], following
+# pp-proxy above. [workstations] means "the simulated business's user
+# endpoints" -- it feeds nothing but this group today, but a future play
+# targeting it for scenario activity or attack simulation should not silently
+# sweep in the blue team's own tooling.
+win-hunt-1
+win-hunt-2
+win-hunt-3
+win-hunt-4
+win-hunt-5
+win-hunt-6
+
+[splunk-forwarder:children]
+domain_controllers
+corporate_servers
+dmz
+workstations
+
+
+[hunt]
+win-hunt-1
+win-hunt-2
+win-hunt-3
+win-hunt-4
+win-hunt-5
+win-hunt-6
+
+# ------------------------------------------------------------
+# VyOS routers and firewalls (replaces old Firewall/Router primitives)
+# ------------------------------------------------------------
+[vyos]
+pp-isp-router
+pp-internal-router
+# pp-ot-router excluded — it's a SimSpace RC_NG_OT_Router appliance, not VyOS;
+# the vyos role's `set interface ...` commands are rejected. Self-configures
+# from its image; managed (if at all) via a future role, not this one.
+site-edge-router
+pp-corp-router
+# pp-ot-firewall, pp-internal-firewall, pp-external-firewall moved to
+# [pfsense] (image swap; all three firewalls now pfSense, static routing only)
+
+# ------------------------------------------------------------
+# pfSense firewalls
+# ------------------------------------------------------------
+[pfsense]
+pp-ot-firewall
+pp-internal-firewall
+pp-external-firewall
+
+# ------------------------------------------------------------
+# VyOS-CLI-compatible boxes that the customer's full `vyos` role
+# can't manage (e.g., interface commands fail on the appliance) but
+# that still accept raw `vyos_config` calls for routing. Targeted by
+# the "Additional VyOS static routes" play, NOT the full vyos role.
+# ------------------------------------------------------------
+[vyos_routes_only]
+pp-ot-router
+
+# ------------------------------------------------------------
+# Infrastructure / special systems (not domain-managed)
+# ------------------------------------------------------------
+[infrastructure]
+ansible
+is-inet
+Red-1
+Activity-Emulation
+
+# ------------------------------------------------------------
+# The Ansible controller, on its own.
+# ------------------------------------------------------------
+# Added 2026-08-03. playbooks/10-mirror.yml originally targeted
+# [infrastructure] on the assumption that it meant "the controller" — it
+# does not. It also holds is-inet, Red-1 and Activity-Emulation, so the
+# mirror role ran against the simulated-internet host and two red-team
+# boxes. Nothing else in arbitr_pp_playbook.yaml targets [infrastructure],
+# which is why the mistake was invisible until the SO phases ran.
+#
+# connection=local because this IS the box Ansible runs on: it sidesteps
+# SSH entirely (the host carries no ansible_user, so it was authenticating
+# as root and being refused) and matches so-ansible's [ansible_controller].
+[ansible_controller]
+ansible ansible_connection=local
+
+[proxy]
+pp-proxy
+
+# ------------------------------------------------------------
+# Forensics / malware analysis tooling — pp-security subnet
+# ------------------------------------------------------------
+# Label group. No play targets it; it exists so these hosts are recorded
+# rather than invisible. A host absent from inventory is a host nobody
+# reasons about -- see pp-dcs-ctrl, which sat with no telemetry for months
+# because [ot_servers] was never made a child of [splunk-forwarder].
+#
+# TELEMETRY POSTURE, decided 2026-09-01: instrument what ANALYSES, not what
+# DETONATES.
+#   pp-sift    evidence host (disk/memory images, timelines). Executes
+#              nothing hostile and holds the investigation's work product,
+#              so it is a high-value target and SHOULD carry an agent --
+#              the same argument recorded for [hunt] above. Not yet
+#              enrolled: see the note below.
+#   pp-remnux  detonation host -> [unmanaged], not enrolled
+#   pp-flare   detonation host -> [unmanaged], not enrolled
+#
+# TO ENROL pp-sift, three things are needed and none are assumed here:
+#   1. host_vars/pp-sift.yml with ansible_host and working credentials --
+#      the RDP_SIFT image may not carry the simspace account group_vars/
+#      linux.yml expects.
+#   2. a decision NOT to add it to [linux]: that group pulls in the `common`
+#      role, which performs a systemd-networkd -> NetworkManager cutover, a
+#      netplan overwrite and a reboot. Appropriate for a range-built Ubuntu
+#      host, not for a vendor forensics appliance.
+#   3. adding `forensics` to the enrol pattern in playbooks/75-endpoint.yml
+#      (`windows:linux:!unmanaged:!so_all`), which then picks up pp-sift and
+#      still excludes the two detonation hosts via [unmanaged].
+[forensics]
+pp-sift
+pp-remnux
+pp-flare
+
+# ------------------------------------------------------------
+# Unmanaged systems — hard-coded, NOT targeted by any Ansible play.
+# Contains specialized pre-built appliances (OT PLCs/HMIs + the elgg
+# social-platform vuln host) that self-configure from their images.
+# ------------------------------------------------------------
+[unmanaged]
+pp-gas-sim
+pp-gasplant-plc
+pp-gasvibsens
+pp-ot-hist
+pp-engws
+elgg
+# Malware analysis hosts, added 2026-09-01. DELIBERATELY unmanaged, and the
+# reason is telemetry rather than configuration: both exist to execute
+# malware. Sysmon and Elastic Agent on a detonation box emit process trees,
+# network connections and file writes that are indistinguishable from an
+# intrusion -- because they are one, just an authorised one. Enrolling them
+# would feed instructor activity into the SIEM students are hunting in.
+# playbooks/75-endpoint.yml excludes [unmanaged], so this placement is what
+# keeps them out; no play change is needed.
+pp-remnux
+pp-flare
+
+[aue]
+pp-bp-wkstn-1
+pp-bp-wkstn-2
+pp-bp-wkstn-3
+pp-bp-wkstn-4
+pp-bp-wkstn-5
+pp-bp-wkstn-6
+pp-bp-wkstn-7
+pp-bp-wkstn-8
+pp-eng-wkstn-1
+pp-eng-wkstn-2
+pp-eng-wkstn-3
+pp-eng-wkstn-4
+pp-eng-wkstn-5
+pp-eng-wkstn-6
+pp-eng-wkstn-7
+pp-eng-wkstn-8
+pp-ls-wkstn-1
+pp-ls-wkstn-2
+pp-ls-wkstn-3
+pp-ls-wkstn-4
+pp-ls-wkstn-5
+pp-ls-wkstn-6
+pp-is-wkstn-1
+pp-is-wkstn-2
+pp-is-wkstn-3
+pp-is-wkstn-4
+pp-ctl-wks-01
+pp-ctl-wks-02
+pp-ctl-wks-03
+pp-ctl-wks-04
+
+[ae]
+pp-dc01
+pp-dc02
+pp-dc03
+pp-file
+pp-sql
+pp-mail
+pp-dcs-ctrl

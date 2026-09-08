@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Welcome back, {{ customer['full_name'].split(' ')[0] }}.</h1>
+<p class="sub">Account {{ customer['account_number'] }} &middot; service since {{ customer['service_start_date'] }}.</p>
+
+<div class="card-row">
+  <div class="card">
+    <div class="card-label">Balance due</div>
+    <div class="card-value{% if unpaid_total > 0 %} due{% endif %}">${{ '%.2f' | format(unpaid_total) }}</div>
+    {% if unpaid_total > 0 %}
+      <a class="cta" href="{{ url_for('pay') }}">Pay now</a>
+    {% else %}
+      <div class="card-sub">No balance owed.</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-label">Last 30 days usage</div>
+    <div class="card-value">{{ last_30_kwh }} kWh</div>
+    <a class="cta-link" href="{{ url_for('usage') }}">View usage history &rarr;</a>
+  </div>
+
+  {% if latest_bill %}
+    <div class="card">
+      <div class="card-label">Most recent bill</div>
+      <div class="card-value">${{ '%.2f' | format(latest_bill['amount_due']) }}</div>
+      <div class="card-sub">{{ latest_bill['period_start'] }} &mdash; {{ latest_bill['period_end'] }}</div>
+      <a class="cta-link" href="{{ url_for('bill_detail', bill_id=latest_bill['id']) }}">View bill &rarr;</a>
+    </div>
+  {% endif %}
+</div>
+
+<h2>Quick links</h2>
+<ul class="link-list">
+  <li><a href="{{ url_for('bills') }}">View all bills</a></li>
+  <li><a href="{{ url_for('usage') }}">Check daily usage</a></li>
+  <li><a href="{{ url_for('pay') }}">Pay a bill</a></li>
+  <li><a href="{{ url_for('profile') }}">Update account info</a></li>
+</ul>
+{% endblock %}

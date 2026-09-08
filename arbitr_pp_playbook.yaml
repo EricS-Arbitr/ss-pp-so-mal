@@ -1,0 +1,1075 @@
+---
+- name: Init
+  hosts: windows
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - init
+  tags:
+    - init
+
+# Pre-bootstrap for Windows: rename network adapters to canonical
+# Ethernet0/Ethernet1/... by ifIndex order. The customer's common role
+# (xIPAddress / xDefaultGatewayAddress / xDNSServerAddress) keys on
+# InterfaceAlias = "Ethernet0" etc. — but some SimSpace Windows images
+# (notably RDP_Windows_Server_2019:1.1.0 on pp-mail) ship with default names
+# like "Ethernet"/"Ethernet 2", which makes DSC fail with
+# "Interface 'Ethernet0' is not available."
+# All Windows hosts use managementInterface.position: FIRST, so mgmt gets the
+# lowest ifIndex and becomes Ethernet0 after rename, matching host_vars.
+- name: Windows adapter rename pre-config
+  hosts: windows
+  gather_facts: false
+  tasks:
+    - name: Rename Windows adapters to canonical Ethernet0/EthernetN by ifIndex order
+      ansible.windows.win_powershell:
+        script: |
+          $adapters = @(Get-NetAdapter | Sort-Object ifIndex)
+          $names = @($adapters | ForEach-Object { $_.Name })
+          $count = $adapters.Count
+
+          # If all expected canonical names already exist among the adapters,
+          # the image's naming is correct — leave it alone. Doing otherwise
+          # risks swapping the mgmt/data-plane mapping when ifIndex ordering
+          # doesn't match the image's existing Name ordering (which it often
+          # doesn't on SimSpace Windows 10/11 images).
+          $allCanonical = $true
+          for ($i = 0; $i -lt $count; $i++) {
+            if ($names -notcontains "Ethernet$i") { $allCanonical = $false; break }
+          }
+          if ($allCanonical) {
+            $Ansible.Changed = $false
+            Write-Output "All adapter names already canonical; no rename."
+            return
+          }
+
+          # Non-canonical naming (e.g. Server 2019 image ships with
+          # "Ethernet"/"Ethernet 2"). Rename via a temp-name pass first so
+          # the final names can't collide with existing names mid-loop.
+          $tempPrefix = "_ppRename_"
+          $tempIdx = 0
+          foreach ($a in $adapters) {
+            Rename-NetAdapter -Name $a.Name -NewName "$tempPrefix$tempIdx" -ErrorAction Stop
+            $tempIdx++
+          }
+          $renamed = @()
+          $idx = 0
+          foreach ($a in $adapters) {
+            $target = "Ethernet$idx"
+            Rename-NetAdapter -Name "$tempPrefix$idx" -NewName $target -ErrorAction Stop
+            $renamed += "$($a.Name) -> $target"
+            $idx++
+          }
+          $Ansible.Changed = $true
+          Write-Output ($renamed -join '; ')
+  tags:
+    - common
+    - win_adapter_rename
+
+# Pre-bootstrap for Linux: drop a NetworkManager conf snippet that opts eth*
+# devices INTO management before the common role's nmcli tasks run. Without
+# this, netplan's renderer:NetworkManager stub (with no `ethernets:` listed)
+# causes NM to mark eth0/eth1 as unmanaged, and nmcli activation fails with
+# "No suitable device found for this connection".
+- name: Linux NM managed-devices pre-config
+  hosts: linux
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Ensure NetworkManager is installed
+      ansible.builtin.apt:
+        name: network-manager
+        state: present
+    - name: Opt eth* devices into NetworkManager management
+      ansible.builtin.copy:
+        dest: /etc/NetworkManager/conf.d/99-pp-eth-managed.conf
+        content: |
+          [keyfile]
+          unmanaged-devices=
+
+          [device-eth-managed]
+          match-device=interface-name:eth*
+          managed=true
+        owner: root
+        group: root
+        mode: '0644'
+      register: nm_managed_conf
+    - name: Restart NetworkManager if config changed
+      ansible.builtin.systemd:
+        name: NetworkManager
+        state: restarted
+        enabled: true
+      when: nm_managed_conf.changed
+    - name: Wait for NetworkManager to settle after restart
+      ansible.builtin.pause:
+        seconds: 3
+      when: nm_managed_conf.changed
+    - name: Force eth devices into managed state at runtime
+      ansible.builtin.shell: |
+        nmcli device set "{{ item }}" managed yes
+      loop:
+        - eth0
+        - eth1
+      register: nmcli_set_managed
+      changed_when: "'successfully' in (nmcli_set_managed.stdout | default(''))"
+      failed_when: false
+  tags:
+    - common
+    - nm_managed_eth
+
+- name: Common Role
+  hosts: windows,linux
+  gather_facts: true
+  roles:
+    - common
+  tags:
+    - common
+
+# The Ubuntu Desktop images ship with gnome-initial-setup enabled, which
+# pops the "Connect Your Online Accounts" / Welcome wizard the first time
+# anyone logs into the GUI. Drop the documented "wizard already seen" flag
+# file under each existing user's ~/.config and in /etc/skel so future
+# users inherit it. gnome-initial-setup checks for this file and exits
+# silently when it contains "yes".
+- name: Suppress GNOME initial-setup wizard on Linux desktops
+  hosts: linux
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Find user home directories under /home
+      ansible.builtin.find:
+        paths: /home
+        file_type: directory
+        depth: 1
+      register: gnome_user_homes
+
+    - name: Ensure ~/.config exists for each user
+      ansible.builtin.file:
+        path: "{{ item.path }}/.config"
+        state: directory
+        owner: "{{ item.pw_name }}"
+        group: "{{ item.gr_name }}"
+        mode: '0755'
+      loop: "{{ gnome_user_homes.files }}"
+
+    - name: Mark GNOME initial-setup done for each existing user
+      ansible.builtin.copy:
+        dest: "{{ item.path }}/.config/gnome-initial-setup-done"
+        content: "yes\n"
+        owner: "{{ item.pw_name }}"
+        group: "{{ item.gr_name }}"
+        mode: '0644'
+      loop: "{{ gnome_user_homes.files }}"
+
+    - name: Ensure /etc/skel/.config exists for future users
+      ansible.builtin.file:
+        path: /etc/skel/.config
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Mark GNOME initial-setup done in /etc/skel
+      ansible.builtin.copy:
+        dest: /etc/skel/.config/gnome-initial-setup-done
+        content: "yes\n"
+        owner: root
+        group: root
+        mode: '0644'
+  tags:
+    - common
+    - gnome_initial_setup
+
+- name: Vyos Role
+  hosts: vyos
+  gather_facts: false
+  roles:
+    - vyos
+  tags:
+    - vyos
+
+# The customer's vyos role's `static_route` field is a single dict, not a
+# list. Hosts that need more than one static route (e.g. pp-internal-router
+# after the pp-ot-firewall pfSense swap) declare additional routes here in
+# host_vars as `extra_static_routes: [{network, next_hop, descr}]`. The
+# role's auto `redistribute static` picks these up into iBGP.
+- name: Additional VyOS static routes
+  hosts: vyos:vyos_routes_only
+  gather_facts: false
+  tasks:
+    - name: Push extra static routes via vyos_config
+      vyos.vyos.vyos_config:
+        match: line
+        lines:
+          - "set protocols static route {{ item.network }} next-hop {{ item.next_hop }}"
+        save: true
+      loop: "{{ extra_static_routes | default([]) }}"
+      when: extra_static_routes is defined and (extra_static_routes | length) > 0
+  tags:
+    - vyos
+    - extra_static_routes
+
+# The SimSpace VyOS image template bakes a stale `0.0.0.0/0 next-hop <X>`
+# entry for every /24 "departmental" interface on the box. On routers with
+# more than one such interface (pp-internal-router, pp-isp-router,
+# pp-corp-router) this creates multiple equal-cost competing default routes
+# where the next-hops are the router's OWN connected IPs. FRR refuses to
+# install a default whose next-hop resolves to a local interface and ECMPs
+# the whole route out of the FIB — leaving the router with no default at
+# all. Symptom: `show ip route` has no `S>* 0.0.0.0/0` line; downstream
+# subnets get ICMP "Destination net unreachable".
+#
+# Each affected host declares `extra_static_routes_remove: [{network,
+# next_hop}]` in host_vars. This play issues the matching `delete` so the
+# only default left is the one the customer `vyos` role just set from
+# `static_route`. Logged in UPSTREAM_FIXES.md.
+- name: Remove stale VyOS static routes (image-baked self-loop defaults)
+  hosts: vyos:vyos_routes_only
+  gather_facts: false
+  tasks:
+    - name: Delete stale static routes via vyos_config
+      vyos.vyos.vyos_config:
+        match: line
+        lines:
+          - "delete protocols static route {{ item.network }} next-hop {{ item.next_hop }}"
+        save: true
+      loop: "{{ extra_static_routes_remove | default([]) }}"
+      when: extra_static_routes_remove is defined and (extra_static_routes_remove | length) > 0
+  tags:
+    - vyos
+    - extra_static_routes_remove
+
+# Architectural shift 2026-06-10: corp IGP moved from iBGP to OSPF area 0.
+# The customer vyos role's `Configure BGP` task pushed iBGP config on
+# earlier deploys; setting `bgp: []` in host_vars stops new pushes but
+# doesn't remove what's already there. This play deletes the entire
+# `protocols bgp` subtree on hosts that opt in via `remove_vyos_bgp: true`.
+# pp-isp-router intentionally keeps its eBGP block (it's the WAN edge).
+- name: Remove stale VyOS iBGP (architectural shift to OSPF-IGP)
+  hosts: vyos:vyos_routes_only
+  gather_facts: false
+  tasks:
+    - name: Delete protocols bgp via vyos_config
+      vyos.vyos.vyos_config:
+        lines:
+          - "delete protocols bgp"
+        save: true
+      when: remove_vyos_bgp | default(false)
+  tags:
+    - vyos
+    - remove_vyos_bgp
+
+# =============================================================================
+# Range-wide IPv6 disable
+# =============================================================================
+# Windows is already covered by the customer `common` role (sets HKLM
+# Tcpip6\Parameters\DisabledComponents=0xFF via DSC). pfSense is covered
+# by the pfsense_firewall role (config.xml <ipv6allow> removed, sysctl
+# net.inet6.ip6.auto_linklocal=0, existing fe80:: addrs deleted). Linux
+# and VyOS have no baseline handling and are covered by these two plays.
+
+- name: Disable IPv6 — Linux
+  hosts: linux
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Drop /etc/sysctl.d/99-disable-ipv6.conf
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-disable-ipv6.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # Managed by Ansible (arbitr_pp_playbook.yaml). Range-wide IPv6
+          # disable -- no IPv6 anywhere on any Linux host in this range.
+          net.ipv6.conf.all.disable_ipv6 = 1
+          net.ipv6.conf.default.disable_ipv6 = 1
+          net.ipv6.conf.lo.disable_ipv6 = 1
+      register: sysctl_v6
+
+    - name: Apply sysctl immediately (no reboot)
+      ansible.builtin.command: sysctl --system
+      when: sysctl_v6.changed
+      changed_when: false
+  tags:
+    - ipv6
+    - disable_ipv6
+
+# `set system ipv6 disable` toggles the kernel flag but existing IPv6
+# sessions/interfaces stay up until reboot. Reboot is required for a
+# fully-clean IPv4-only state. `wait_for` polls the mgmt SSH port from
+# the controller so the deploy resumes cleanly after the box comes back.
+- name: Disable IPv6 — VyOS
+  hosts: vyos:vyos_routes_only
+  gather_facts: false
+  tasks:
+    - name: Disable IPv6 stack + forwarding via vyos_config
+      vyos.vyos.vyos_config:
+        lines:
+          - "set system ipv6 disable"
+          - "set system ipv6 disable-forwarding"
+        save: true
+      register: vyos_v6
+
+    - name: Trigger reboot on VyOS
+      vyos.vyos.vyos_command:
+        commands:
+          - command: "reboot now"
+            prompt: "Are you sure you want to reboot"
+            answer: "y"
+      when: vyos_v6.changed
+      ignore_errors: true       # SSH drops mid-command; expected
+
+    - name: Wait for VyOS SSH to come back
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        delay: 30
+        timeout: 300
+      delegate_to: localhost
+      when: vyos_v6.changed
+
+    # meta: reset_connection ignores `when:` per Ansible docs -- always
+    # run it. Harmless if the box didn't reboot (just re-opens the
+    # network_cli session for the next play).
+    - name: Reset ansible connection so subsequent plays reconnect fresh
+      ansible.builtin.meta: reset_connection
+  tags:
+    - ipv6
+    - disable_ipv6
+
+- name: pfSense firewalls
+  hosts: pfsense
+  gather_facts: false
+  roles:
+    - pfsense_firewall
+  tags:
+    - pfsense
+
+- name: dcpromo
+  hosts: pdc
+  gather_facts: false
+  roles:
+    - dcpromo
+  tags:
+    - dcpromo
+
+- name: Create Users
+  hosts: pdc
+  gather_facts: false
+  roles:
+    - create_users
+    - group_assignment
+  tags:
+    - create_users
+
+- name: File Share
+  hosts: file
+  gather_facts: false
+  roles:
+    - fileserver
+  tags:
+    - fileserver
+
+- name: Mapped Drive
+  hosts: pdc
+  gather_facts: false
+  roles:
+    - role: mapped_drive
+      when: map_drive_letter is defined
+  tags:
+    - mapped_drive
+
+- name: squid
+  hosts: proxy
+  gather_facts: false
+  become: true
+  roles:
+    - squid
+  tags:
+    - squid
+
+- name: wordpress-pv
+  hosts: wordpress-pv
+  gather_facts: false
+  become: true
+  roles:
+    - docker
+    - wordpress-pv
+  tags:
+    - wordpress-pv
+
+- name: billing_site
+  hosts: wordpress-pv
+  gather_facts: false
+  become: true
+  roles:
+    - billing_site
+  tags:
+    - billing_site
+
+- name: voltgrid_site
+  hosts: wordpress-pv
+  gather_facts: false
+  become: true
+  roles:
+    - voltgrid_site
+  tags:
+    - voltgrid_site
+
+- name: dns
+  hosts: pdc
+  gather_facts: false
+  roles:
+    - dns
+  tags:
+    - dns
+
+# The customer's `dns` role creates AD zones and records but doesn't touch
+# DNS forwarders, so anything outside voltgrid.com is unresolvable on the
+# domain workstations. Point both DCs at is-inet's simulated public DNS.
+# is-inet's unbound binds to the aliased IPs (8.8.8.8, 8.8.4.4, 1.1.1.1)
+# rather than the primary data-plane IP (200.200.200.2), so we forward to
+# those directly. Listing three for redundancy / round-robin coverage.
+- name: Configure DNS forwarders to is-inet
+  hosts: domain_controllers
+  gather_facts: false
+  tasks:
+    - name: Point Windows DNS forwarder at is-inet
+      ansible.windows.win_powershell:
+        script: |
+          $current = @((Get-DnsServerForwarder).IPAddress.IPAddressToString | Sort-Object)
+          $desired = @('8.8.8.8', '8.8.4.4', '1.1.1.1') | Sort-Object
+          if (-not (Compare-Object $current $desired -SyncWindow 0)) {
+            $Ansible.Changed = $false
+            Write-Output "DNS forwarder already set to: $($desired -join ', ')"
+          } else {
+            Set-DnsServerForwarder -IPAddress $desired -UseRootHint $false -Timeout 3
+            $Ansible.Changed = $true
+            Write-Output "DNS forwarder updated to: $($desired -join ', ')"
+          }
+  tags:
+    - dns
+    - dns_forwarder
+
+- name: ae_gpo
+  hosts: pdc
+  gather_facts: false
+  roles:
+    - role: ae_gpo
+    - role: disable_defender
+      when: "groups.get('ae', []) | length > 0"
+  tags:
+    - ae_gpo
+    - disable_defender
+
+- name: Strip APIPA
+  hosts: members
+  gather_facts: false
+  strategy: free                # per-host reg + netsh, no cross-host sync
+  roles:
+    - strip_apipa
+  tags:
+    - strip_apipa
+
+- name: Join Domain
+  hosts: members
+  gather_facts: false
+  # NOTE: cannot use `strategy: free` here -- role uses the `pause` module
+  # which bypasses the host loop and is unsupported under the free strategy.
+  # Domain join is one of the slowest plays; if wall-clock matters, convert
+  # `pause` in domain_member_retry to `wait_for` (delegated) as an overlay fix.
+  pre_tasks:
+    # PRECONDITION, added 2026-08-07. domain_member_retry already retries once
+    # with a reboot, but it never checks whether the DOMAIN is reachable -- it
+    # joins, waits 45s, verifies, reboots, joins again. If DNS is not yet
+    # answering for the domain, both attempts fail identically. That is exactly
+    # what pp-ls-wkstn-5 did on a fresh blueprint deploy: "The specified domain
+    # either does not exist or could not be contacted", twice, while its
+    # siblings on the same subnet with the same DNS server joined fine. Not a
+    # config difference -- it reached the join before the DC was answering.
+    #
+    # _ldap._tcp.dc._msdcs.<domain> is the SRV record domain join actually
+    # looks up, so waiting on it is the precondition itself rather than a proxy
+    # like "can I ping the DC". -DnsOnly keeps LLMNR/NetBIOS from answering
+    # falsely (CLAUDE.md pitfall 4).
+    - name: Wait for the domain's DC locator SRV record to resolve
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          try {
+            $r = Resolve-DnsName -Name '_ldap._tcp.dc._msdcs.{{ domain_name }}' `
+                   -Type SRV -DnsOnly -ErrorAction Stop
+            Write-Output ([string](@($r).Count))
+          } catch {
+            Write-Output '0'
+          }
+      register: dc_srv
+      changed_when: false
+      failed_when: false
+      until: (dc_srv.output[0] | default('0') | int) > 0
+      retries: 30
+      delay: 20
+
+    - name: Fail with a useful message if the domain never became resolvable
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} could not resolve
+          _ldap._tcp.dc._msdcs.{{ domain_name }} after 10 minutes, so a domain
+          join would fail with "the specified domain either does not exist or
+          could not be contacted". Check that a DC is promoted and that this
+          host's DNS server ({{ (network_interfaces | default([])
+          | selectattr('dns', 'defined') | map(attribute='dns')
+          | first | default(['unknown']))[0] }})
+          is answering.
+      when: (dc_srv.output[0] | default('0') | int) < 1
+  roles:
+    - domain_member_retry
+  tags:
+    - domain_member_retry
+
+- name: Additional DC
+  hosts: additional_dc
+  gather_facts: false
+  roles:
+    - additional_dc
+  tags:
+    - additional_dc
+
+- name: dc_status
+  hosts: pdc,additional_dc
+  gather_facts: false
+  roles:
+    - dc_status
+  tags:
+    - dc_status
+
+# The customer's common/tasks/windows.yml "Disable control net DNS
+# registration" task is a double-no-op: the loop hardcodes "Ehternet0"
+# (typo — never matches the real Ethernet0 mgmt adapter) AND the cmdlet
+# parameter is misspelled (`-RegisterThisConnectionAddress` instead of
+# `-RegisterThisConnectionsAddress`). The result is every Windows host
+# DDNS-registers BOTH Ethernet0 (mgmt 10.255.240.0/20) AND the data-plane
+# adapter into voltgrid.com, so `ping pp-dc01` round-robins onto the
+# mgmt IP — which corp workstations can reach over the orchestration
+# VLAN but which is supposed to be out of play in-scenario.
+#
+# Disable DDNS on Ethernet0 on every Windows host, force a re-register
+# so the data-plane record stays, then purge the already-registered
+# 10.255.240.0/20 A records on the PDC. Logged in UPSTREAM_FIXES.md.
+- name: Strip mgmt interface from AD DNS registration
+  hosts: windows
+  gather_facts: false
+  tasks:
+    - name: Disable DDNS on Ethernet0 (mgmt adapter)
+      ansible.windows.win_powershell:
+        script: |
+          $iface = 'Ethernet0'
+          $c = Get-DnsClient -InterfaceAlias $iface -ErrorAction SilentlyContinue
+          if ($null -eq $c) {
+            $Ansible.Changed = $false
+            Write-Output "No $iface adapter present; nothing to do."
+            return
+          }
+          if ($c.RegisterThisConnectionsAddress) {
+            Set-DnsClient -InterfaceAlias $iface -RegisterThisConnectionsAddress $false
+            ipconfig /registerdns | Out-Null
+            $Ansible.Changed = $true
+            Write-Output "Disabled DDNS on $iface; re-registered."
+          } else {
+            $Ansible.Changed = $false
+            Write-Output "DDNS already disabled on $iface."
+          }
+  tags:
+    - strip_mgmt_dns
+
+- name: Purge mgmt-subnet A and PTR records from AD DNS
+  hosts: pdc
+  gather_facts: false
+  tasks:
+    - name: Remove A records in voltgrid.com whose IPv4 falls in 10.255.240.0/20
+      ansible.windows.win_powershell:
+        script: |
+          $zone = 'voltgrid.com'
+          # 10.255.240.0/20 = 10.255.240.0 .. 10.255.255.255 (240, 241, ..., 255)
+          $stale = Get-DnsServerResourceRecord -ZoneName $zone -RRType A -ErrorAction SilentlyContinue |
+            Where-Object {
+              $ip = $_.RecordData.IPv4Address.ToString()
+              if ($ip -notlike '10.255.*') { return $false }
+              $third = [int]($ip.Split('.')[2])
+              ($third -ge 240) -and ($third -le 255)
+            }
+          foreach ($r in $stale) {
+            Remove-DnsServerResourceRecord -ZoneName $zone -InputObject $r -Force -ErrorAction Stop
+            Write-Output ("Removed A: {0} -> {1}" -f $r.HostName, $r.RecordData.IPv4Address)
+          }
+          $Ansible.Changed = ($stale.Count -gt 0)
+
+    - name: Remove PTR records in any 10.255.240.0/20 reverse zone
+      ansible.windows.win_powershell:
+        script: |
+          $changed = $false
+          # SimSpace's mgmt is 10.255.240.0/20; only the .240-.255 third octets
+          # are in-range. AD typically creates per-/24 reverse zones if any
+          # PTR was ever registered.
+          for ($t = 240; $t -le 255; $t++) {
+            $rev = "$t.255.10.in-addr.arpa"
+            if (-not (Get-DnsServerZone -Name $rev -ErrorAction SilentlyContinue)) { continue }
+            $ptrs = Get-DnsServerResourceRecord -ZoneName $rev -RRType Ptr -ErrorAction SilentlyContinue
+            foreach ($r in $ptrs) {
+              Remove-DnsServerResourceRecord -ZoneName $rev -InputObject $r -Force -ErrorAction Stop
+              $changed = $true
+              Write-Output ("Removed PTR: {0}.{1} -> {2}" -f $r.HostName, $rev, $r.RecordData.PtrDomainName)
+            }
+          }
+          $Ansible.Changed = $changed
+  tags:
+    - strip_mgmt_dns
+
+- name: Install root certs
+  hosts: windows
+  gather_facts: false
+  strategy: free                # per-host cert store install, no cross-host sync
+  roles:
+    - root_certs
+  tags:
+    - root_certs
+
+- name: Enable network discovery and suppress the Public/Private popup
+  hosts: windows
+  gather_facts: false
+  strategy: free                # per-host firewall + registry, no cross-host sync
+  roles:
+    - network_discovery
+  tags:
+    - network_discovery
+
+- name: apply AUE settings
+  hosts: aue
+  gather_facts: false
+  strategy: free                # each workstation reboots for chrome+sysmon
+                                # independently -- biggest wall-clock win here
+  roles:
+    - disable_uac
+    - disable_firewall
+    - autologin
+    - ue
+    - chrome
+    - sysmon
+    - aue_agent
+    - secpol
+    - drainhole
+  tags:
+    - disable_uac
+    - disable_firewall
+    - autologin
+    - ue
+    - chrome
+    - sysmon
+    - aue_agent
+    - secpol
+    - drainhole
+
+- name: apply AE settings
+  hosts: ae
+  gather_facts: false
+  strategy: free                # per-host agent + policy config, no cross-host sync
+  roles:
+    - disable_uac
+    - disable_firewall
+    - secpol
+    - aue_agent
+    - drainhole
+  tags:
+    - disable_uac
+    - disable_firewall
+    - secpol
+    - aue_agent
+    - drainhole
+
+- name: configure hunt 
+  hosts: hunt
+  gather_facts: false
+  roles:
+    - chrome
+    - autologin
+  tags:
+    - chrome
+    - autologin
+
+- name: splunk server
+  hosts: splunk
+  gather_facts: true
+  become: true
+  roles:
+    - splunk
+    - splunk-es
+  tags:
+    - splunk
+    - splunk-es
+
+- name: global_dns
+  hosts: global_dns
+  gather_facts: true
+  become: true
+  roles:
+    - global_dns
+  tags:
+    - global_dns
+
+# is-inet's Postfix + Dovecot + webmail stack. Deployed as a docker-compose
+# service under /opt/email/ by the customer `email` role from
+# range-development-ansible. Multi-domain: driven by `email_domains` in
+# group_vars/all.yml (mail.voltgrid.com + mail.outlook.com today). Mailboxes
+# are seeded per-domain from that domain's `DomainUsers` list. Certs are
+# signed by the range root CA bundled in the role's files/.
+#
+# Runs after global_dns so the domain names resolve before the mail stack
+# tries to bring itself up (Postfix's smtpd_helo checks fire against the
+# domain's own MX record on startup).
+- name: email — is-inet Postfix + Dovecot + webmail
+  hosts: is-inet
+  gather_facts: true
+  become: true
+  roles:
+    - email
+  tags:
+    - email
+    - is-inet
+
+# Central syslog collector. pp-syslog runs rsyslog listening on UDP+TCP
+# 514 and writes per-host files at /var/log/remote/<hostname>/syslog.log.
+# Splunk UF on the same host (deployed by the splunk-forwarder play below)
+# tails those files into Splunk via the custom lin_inputs.conf.j2 overlay.
+- name: Syslog collector — pp-syslog
+  hosts: syslog
+  gather_facts: true
+  become: true
+  roles:
+    - syslog_server
+  tags:
+    - syslog
+    - syslog_server
+
+# Linux client config: drop a snippet that forwards everything to pp-syslog
+# over UDP/514. Local /var/log/syslog still gets the messages too; the
+# remote copy is what Splunk UF (on pp-syslog) ships to Splunk.
+- name: Syslog client — Linux
+  hosts: linux:!syslog
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Drop rsyslog forwarder snippet
+      ansible.builtin.copy:
+        dest: /etc/rsyslog.d/00-forward.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # Forward all logs to central syslog collector (pp-syslog).
+          # Managed by Ansible (arbitr_pp_playbook.yaml). UDP — accepted on
+          # both UDP and TCP by the server; UDP avoids the queue-up failure
+          # mode if pp-syslog is briefly unreachable.
+          *.* @{{ syslog_server_ip }}:514
+      register: rsyslog_forward
+    - name: Restart rsyslog if forwarder snippet changed
+      ansible.builtin.systemd:
+        name: rsyslog
+        state: restarted
+      when: rsyslog_forward.changed
+  tags:
+    - syslog
+    - syslog_client
+
+# VyOS + vyos_routes_only client config: push the syslog remote-host line.
+# `set system syslog host` is idempotent under vyos_config; level "info"
+# matches what the GUI default sets.
+#
+# pp-isp-router is excluded: it represents the upstream ISP, not corporate
+# gear, and shipping its logs into the internal syslog collector would be
+# unrealistic for the cyber-range scenario (defenders see external-network
+# events in their internal SIEM).
+- name: Syslog client — VyOS
+  hosts: vyos:vyos_routes_only:!pp-isp-router
+  gather_facts: false
+  tasks:
+    - name: Configure remote syslog host
+      vyos.vyos.vyos_config:
+        match: line
+        lines:
+          - "set system syslog host {{ syslog_server_ip }} facility all level info"
+        save: true
+  tags:
+    - syslog
+    - syslog_client
+
+# pfSense client config: write the remote-logging block in config.xml and
+# restart syslogd. pfsensible.core 0.7.x has no syslog module, so we drive
+# config.xml directly via php -r (same pattern as the GW_WAN cleanup task
+# in the pfsense_firewall role). Idempotent — only writes + restarts when
+# config differs.
+- name: Syslog client — pfSense
+  hosts: pfsense
+  gather_facts: false
+  tasks:
+    - name: Configure remote syslog server in pfSense config.xml
+      ansible.builtin.shell: |
+        php -r 'require_once("/etc/inc/config.inc");
+                require_once("/etc/inc/system.inc");
+                $target = getenv("PFS_SYSLOG_SRV");
+                $cur = config_get_path("syslog", []);
+                $changed = false;
+                $desired = [
+                  "remoteserver" => $target,
+                  "ipproto"      => "ipv4",
+                  "logall"       => true,
+                  "enable"       => true,
+                ];
+                foreach ($desired as $k => $v) {
+                  $existing = $cur[$k] ?? null;
+                  if ($v === true) {
+                    if ($existing !== true && $existing !== "yes" && $existing !== "on") {
+                      $cur[$k] = true; $changed = true;
+                    }
+                  } else if (($existing ?? "") !== $v) {
+                    $cur[$k] = $v; $changed = true;
+                  }
+                }
+                if ($changed) {
+                  config_set_path("syslog", $cur);
+                  write_config("Enable remote syslog to " . $target);
+                  system_syslogd_start();
+                  echo "CHANGED: remote syslog enabled, server=" . $target . "\n";
+                } else {
+                  echo "OK: remote syslog already configured for " . $target . "\n";
+                }'
+      environment:
+        PFS_SYSLOG_SRV: "{{ syslog_server_ip }}"
+      register: pfsense_syslog_cfg
+      changed_when: "'CHANGED' in pfsense_syslog_cfg.stdout"
+  tags:
+    - syslog
+    - syslog_client
+
+- name: splunk forwarder
+  hosts: splunk-forwarder
+  gather_facts: true
+  become: true
+  roles:
+    - role: splunk-forwarder
+      when: splunk_server_ip is defined
+  tags:
+    - splunk-forwarder
+
+# =============================================================================
+# Management plane carries NO AD traffic — enforced, not assumed
+# =============================================================================
+# REQUIREMENT (Eric, 2026-08-17): no range-generated AD/LDAP traffic may cross
+# 10.255.240.0/20. CLAUDE.md §8 already says the management plane is
+# out-of-band and invisible in-scenario; this play makes that enforceable.
+#
+# WHY A SECOND PASS. "Strip mgmt interface from AD DNS registration" and
+# "Purge mgmt-subnet A records" both run much earlier, right after dc_status --
+# and roughly thirty plays follow them, several of which reboot a DC. A DC
+# re-registers its DNS records on every Netlogon start, so a purge in the
+# middle of the run proves nothing about the state at the end of it.
+#
+# MEASURED ON A DEPLOYED RANGE 2026-08-13, with both earlier plays having run:
+#
+#   Get-DnsServerResourceRecord -ZoneName blackstone.mil -RRType A
+#     bs-dc01  10.255.240.136
+#     bs-dc02  10.255.240.178
+#
+#   Resolve-DnsName bs-dc01.blackstone.mil -Type A
+#     172.31.2.7        <- production
+#     10.255.240.136    <- management
+#
+# Clients round-robin across both, so roughly HALF of all Kerberos, LDAP and
+# RPC traffic was crossing the management plane -- visible to trainees hunting
+# in Security Onion as 10.255.240.x in authentication flows, which is
+# out-of-scenario infrastructure they should not know exists. The SO dashboard
+# is what surfaced it: destination.ip showed the four DC management addresses
+# with counts comparable to their production ones.
+#
+# NOT fixing this with Netlogon's DnsAvoidRegisterRecords. The domain-level
+# "same as parent" records are already clean here -- blackstone.mil resolves to
+# production addresses only -- so that control addresses a problem this range
+# does not have, and a wrong mnemonic would break DC locator. Purge what is
+# demonstrably wrong, then assert it stayed gone.
+# =============================================================================
+# Management plane — stop the DNS server PUBLISHING its own mgmt address
+# =============================================================================
+# MEASURED 2026-08-18. The purge play below removed all three 10.255.240.x A
+# records during the previous full deploy and the deploy succeeded, which means
+# REMAINING was 0 at the end of it. They were back within a day, and:
+#
+#   Get-DnsServerResourceRecord -ZoneName voltgrid.com -RRType A
+#     pp-dc01 10.255.240.109 TS=        <- EMPTY timestamp
+#     pp-dc02 10.255.240.154 TS=
+#     pp-dc03 10.255.240.203 TS=
+#
+# An empty timestamp means the record is STATIC, not dynamically registered.
+# That matters because it explains why the existing fix could not work:
+# RegisterThisConnectionsAddress governs DYNAMIC client registration only, and
+# it is already correctly False on Ethernet0 (the mgmt NIC) on all three DCs.
+# The records were never coming from the DNS client.
+#
+# They come from the DNS SERVER. A multihomed Windows DNS server publishes a
+# host record for every address bound to it, into the zones it is authoritative
+# for, as static records -- on every service start. PublishAddresses restricts
+# that to a named list, and was NOT SET on any of the three DCs.
+#
+# This play makes the purge below a SAFETY NET rather than the mechanism. Purge
+# alone was whack-a-mole: correct at the end of every deploy, wrong a day later.
+- name: Management plane — restrict which addresses each DC's DNS server publishes
+  hosts: domain_controllers
+  gather_facts: false
+  tags:
+    - mgmt_dns
+    - publish_addresses
+  tasks:
+    # Derived from host_vars rather than hardcoded: the production NIC is
+    # whichever interface is NOT in the 10.255.240.0/20 management plane.
+    - name: Derive this DC's production address from host_vars
+      ansible.builtin.set_fact:
+        dc_prod_ip: >-
+          {{ network_interfaces
+             | rejectattr('ipv4.address', 'match', '10\.255\.(24[0-9]|25[0-5])\.')
+             | map(attribute='ipv4.address')
+             | list | first | default('') }}
+
+    # A blank result would write an empty PublishAddresses and stop the DC
+    # publishing ANY host record, breaking DC locator. Fail instead.
+    - name: A production address must have been identified
+      ansible.builtin.assert:
+        that:
+          - dc_prod_ip | length > 0
+        fail_msg: >-
+          Could not identify a non-management address for {{ inventory_hostname }}
+          from network_interfaces. Writing PublishAddresses without one would stop
+          this DC publishing any host record at all and break DC locator. Check
+          host_vars/{{ inventory_hostname }}.yml.
+
+    - name: Publish only the production address, never the management one
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\DNS\Parameters
+        name: PublishAddresses
+        data: "{{ dc_prod_ip }}"
+        type: string
+      register: publish_addresses
+
+    # The value is read when the DNS server starts, so without this the change
+    # takes effect at the next reboot -- i.e. the purge below would still find
+    # records this run and the play would look ineffective.
+    - name: Restart DNS so PublishAddresses takes effect before the purge
+      ansible.windows.win_service:
+        name: DNS
+        state: restarted
+      when: publish_addresses.changed
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: DNS server will publish {{ dc_prod_ip }} only
+          (management address withheld).
+
+    # ASSERT THE OUTCOME, NOT THAT THE REGISTRY WRITE SUCCEEDED.
+    # Restricting what a DNS server publishes is exactly the kind of change
+    # that can take a DC off the air, and a DC that cannot resolve through
+    # itself fails every later domain operation with an error naming DNS
+    # rather than this play. PublishAddresses governs what is ADVERTISED, not
+    # what is LISTENED on, so this should always pass -- which is the point:
+    # if it ever fails, something other than this play changed too.
+    #
+    # Verified on pp-dc02 2026-09-04: after the restart the management record
+    # was withdrawn and did not return across a second restart, while
+    # Resolve-DnsName via 127.0.0.1 still answered and the _ldap._tcp SRV
+    # lookup returned 8 records.
+    - name: Prove the DC still resolves through itself after the restart
+      ansible.windows.win_powershell:
+        script: |
+          $self = (Resolve-DnsName -Name "{{ domain_name }}" -Server 127.0.0.1 -ErrorAction SilentlyContinue |
+                   Select-Object -First 1).IPAddress
+          $srv  = @(Resolve-DnsName -Name "_ldap._tcp.dc._msdcs.{{ domain_name }}" -Type SRV -ErrorAction SilentlyContinue).Count
+          if ($self -and $srv -gt 0) { Write-Output ("SELFDNS_OK " + $self + " srv=" + $srv) }
+          else { Write-Output ("SELFDNS_FAIL self=" + $self + " srv=" + $srv) }
+      register: dc_selfdns
+      changed_when: false
+
+    - name: Fail if the DC lost the ability to resolve through itself
+      ansible.builtin.fail:
+        msg: |
+          {{ inventory_hostname }}: {{ dc_selfdns.output[0] | default('(no output)') }}
+
+          PublishAddresses was set to {{ dc_prod_ip }} and this DC can no
+          longer resolve via 127.0.0.1. That setting governs what the server
+          ADVERTISES, not what it listens on, so something else changed too.
+          Check what it is bound to:
+
+            (Get-DnsServerSetting -All).ListenAddresses
+
+          Empty is correct and means all interfaces. If populated, remove the
+          restriction and restart the DNS service.
+
+          To revert this play:
+            Remove-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\DNS\Parameters" PublishAddresses
+            Restart-Service DNS -Force
+      when: "'SELFDNS_OK' not in (dc_selfdns.output[0] | default(''))"
+
+- name: Management plane — purge AD records and PROVE none remain
+  hosts: pdc
+  gather_facts: false
+  tasks:
+    - name: Remove every 10.255.240.0/20 A record from {{ domain_name }}, then recount
+      ansible.windows.win_powershell:
+        script: |
+          $zone = '{{ domain_name }}'
+          function Get-MgmtA {
+            Get-DnsServerResourceRecord -ZoneName $zone -RRType A -ErrorAction SilentlyContinue |
+              Where-Object {
+                $ip = $_.RecordData.IPv4Address.ToString()
+                if ($ip -notlike '10.255.*') { return $false }
+                $third = [int]($ip.Split('.')[2])
+                ($third -ge 240) -and ($third -le 255)
+              }
+          }
+          $stale = @(Get-MgmtA)
+          foreach ($r in $stale) {
+            Remove-DnsServerResourceRecord -ZoneName $zone -InputObject $r -Force -ErrorAction Stop
+          }
+          # Recount AFTER removing. Presence of a delete is not proof of
+          # absence -- the whole point of this play is that something may be
+          # putting them back.
+          $left = @(Get-MgmtA)
+          $names = ($stale | ForEach-Object { "$($_.HostName)=$($_.RecordData.IPv4Address)" }) -join ' '
+          $Ansible.Changed = ($stale.Count -gt 0)
+          Write-Output ("REMOVED=" + $stale.Count + " REMAINING=" + $left.Count + " " + $names)
+      register: mgmt_dns_purge
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} ({{ domain_name }}): {{ mgmt_dns_purge.output[0] }}"
+
+    - name: FAIL if any management-plane A record survived the purge
+      ansible.builtin.fail:
+        msg: |
+          {{ domain_name }} still publishes management-plane addresses after a
+          purge: {{ mgmt_dns_purge.output[0] }}
+
+          Clients resolving a DC name get both its production and its
+          10.255.240.x address and round-robin between them, so roughly half of
+          all Kerberos/LDAP/RPC traffic crosses the management plane. That
+          violates CLAUDE.md §8 and exposes out-of-scenario infrastructure to
+          anyone hunting in the SIEM.
+
+          A record that comes BACK after being deleted is being re-registered,
+          not left over. Check, on this DC:
+
+            Get-DnsClient | Select InterfaceAlias, RegisterThisConnectionsAddress
+              -> the management adapter must be False
+
+            Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'
+              -> if the client setting is already False and records still
+                 return, Netlogon is registering them and needs
+                 DnsAvoidRegisterRecords set for the address record types.
+      when: "'REMAINING=0 ' not in (mgmt_dns_purge.output[0] ~ ' ')"
