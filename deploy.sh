@@ -28,7 +28,29 @@
 PLAYBOOK="site.yml"
 RETRY_FILE="retry/$PLAYBOOK.retry"
 MAX_ATTEMPTS=3
-FORKS=40
+# FORKS is DERIVED, not chosen: it is the largest single play target plus a
+# small margin. Recomputed 2026-09-08.
+#
+#   largest play target : 54  (windows,linux — +1 for pp-ot-malcolm when it lands)
+#   FORKS               : 58
+#
+# Sized so the widest play runs in ONE batch. At 40 forks (inherited from
+# ss-pp-so) a 54-host play ran two rounds, the second only 14 wide. Set to 58
+# rather than 56 because pp-ot-malcolm joins [linux] when Malcolm lands,
+# taking the target to 55.
+# The margin is free: Ansible never spawns more workers than the play has
+# hosts, so excess forks cost nothing, while being one short costs a whole
+# extra round.
+#
+# TRADEOFF: each fork is a separate Python process, so this is a memory
+# question rather than a CPU one -- workers are almost always blocked on
+# WinRM/SSH I/O, not computing. The controller has ~32 GB; 58 forks is a
+# few GB resident. If it starts swapping during a full sweep, drop this
+# rather than assuming the deploy is slow for another reason.
+#
+# RECOUNT, do not increment, when hosts are added or removed. Adding a host
+# to [windows] or [linux] moves the target this is derived from.
+FORKS=58
 
 # --- Speed knobs -------------------------------------------------------------
 # Trims 5-10 minutes off a full-fleet run vs Ansible defaults.
