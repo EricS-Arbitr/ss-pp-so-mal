@@ -68,3 +68,7 @@
 
 # Endpoint telemetry: Sysmon everywhere, then Elastic Agent into SO's Fleet.
 - import_playbook: playbooks/75-endpoint.yml
+
+# Host-scoped log sources (nginx, squid) into SO via dedicated Fleet
+# policies. AFTER 75-endpoint: it reassigns agents that phase enrols.
+- import_playbook: playbooks/80-fleet-integrations.yml

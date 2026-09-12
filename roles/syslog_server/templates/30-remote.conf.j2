@@ -13,9 +13,12 @@ input(type="imtcp" port="514")
 
 # Per-host file template:
 #   /var/log/remote/<hostname>/syslog.log
-# pfSense sends its hostname unqualified (pp-ot-firewall), VyOS sends short
-# hostnames too, Linux uses %HOSTNAME% from /etc/hostname. The Splunk UF on
-# this same host uses the directory name as the host= field.
+# VyOS sends short hostnames, Linux uses %HOSTNAME% from /etc/hostname.
+# pfSense sends NO resolvable hostname -- verified 2026-09-10, its
+# directories are bare addresses (172.16.0.9/.18/.25/.50) while the routers
+# appear by name. Anything matching pfSense messages must key on
+# $fromhost-ip, not $hostname. The directory name remains the attribution
+# for whatever reads this store.
 template(
   name="RemoteHostFile"
   type="list"
@@ -28,6 +31,11 @@ template(
 # Route only remote messages (anything not from localhost) into the per-host
 # files and then stop processing so they don't also land in /var/log/syslog.
 # Local rsyslog/journald messages keep their normal path.
+#
+# THE `stop` ENDS PROCESSING FOR EVERY REMOTE MESSAGE. Any rule that needs to
+# see remote logs must live in a file sorting BEFORE this one --
+# see 29-fleet-forward.conf, which relays firewall messages to the local
+# Elastic agent and was silently dead while numbered 31-.
 if $fromhost-ip != '127.0.0.1' then {
     action(
       type="omfile"

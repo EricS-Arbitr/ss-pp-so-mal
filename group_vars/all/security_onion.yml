@@ -155,7 +155,7 @@ so_agent_endpoint_subnets:
   - "172.16.5.0/24"       # Legal Staff   — pp-ls-wkstn-1..
   - "172.16.6.0/24"       # InfoSec       — pp-is-wkstn-1..4, pp-proxy
   - "172.16.8.0/24"       # DMZ           — pp-dmz-dns, pp-dmz-smtp, pp-www
-  - "172.16.9.0/24"       # pp-security   — pp-splunk, win-hunt-1
+  - "172.16.9.0/24"       # pp-security   — win-hunt-1
   - "192.168.100.0/24"    # PP-OT-Ctrl    — pp-dc03, pp-dcs-ctrl, pp-ctl-wks-01..04
                           #   NOTE: sits behind pp-ot-firewall (default-deny).
                           #   75-endpoint.yml probes reachability before
@@ -185,7 +185,7 @@ so_agent_installer_linux: "so-elastic-agent_linux_amd64"
 # so-elastic-defend-manage-filters.py) and never reads the `operating_system`
 # key, so it structurally cannot express a Linux filter -- our first attempt
 # was created correctly in every respect and stamped Windows-only, so Defend
-# on pp-splunk never evaluated it.
+# on the target host never evaluated it.
 #
 # Safe to self-manage: the helper only ever deletes a GUID listed in
 # disabled-filters.yaml, and only iterates its own input directories. It never
@@ -196,22 +196,21 @@ so_agent_installer_linux: "so-elastic-agent_linux_amd64"
 # produced byte-identical entries, which is why the second reported "up to
 # date" while doing nothing.
 #
-# Path scope: /opt/splunk/var/ covers both var/lib (index buckets, tsidx,
-# .merge) and var/run (dispatch artifacts, splunkd.pid) -- both confirmed in
-# the events. /opt/splunk/bin and /opt/splunk/etc stay VISIBLE: app code and
-# configuration are what an attacker would modify, and excluding them to save
-# events would trade away the detection this host most needs.
-so_defend_exclusions:
-  - id: "99C1EB41-32BC-4FEC-BEA4-AC8A200EC305"
-    name: "Arbitr - Splunk variable data (pp-splunk)"
-    description: >-
-      Splunk bucket and dispatch churn under /opt/splunk/var on pp-splunk:
-      ~11.1M file events/24h, 96% of that host's telemetry. No detection value
-      and it dominates ES retention. bin/ and etc/ remain monitored.
-    os_type: "linux"
-    dataset: "endpoint.events.file"
-    field: "file.path"
-    value: "/opt/splunk/var/*"
+# NO EXCLUSIONS DEFINED. The only entry this list ever held suppressed Splunk
+# bucket/dispatch churn under /opt/splunk/var on pp-splunk (~11.1M file
+# events/24h, 96% of that host's telemetry). Splunk was removed from this
+# range 2026-09-09, so the filter is dead config and has been dropped.
+#
+# The mechanism notes above are KEPT deliberately: they cost real
+# investigation, and the next high-volume exclusion will need every one of
+# them -- especially that SO's helper is structurally Windows-only, and that
+# entries key on event.dataset rather than event type.
+#
+# NOTE on an already-deployed grid: removing an entry here does NOT delete a
+# filter previously created in Fleet. The role only creates and updates. A
+# range built before this change keeps a filter pointing at a path that no
+# longer exists, which is inert but untidy; a fresh range never creates it.
+so_defend_exclusions: []
 
 so_defend_filters_src: "/opt/so/saltstack/local/salt/elasticfleet/files/soc/elastic-defend-custom-filters.yaml"
 so_defend_filters_raw: "/opt/so/conf/elastic-fleet/defend-exclusions/rulesets/custom-filters-raw"
@@ -312,3 +311,22 @@ so_registry_download_passes: 8
 # rather than so_apt_mirror/defaults because the wait play at the top of
 # playbooks/40-manager.yml reads it and does not include that role.
 so_registry_build_log: /var/log/so_registry_build.log
+
+# Where Fleet listens: the manager. In group_vars rather than
+# roles/elastic_agent/defaults because the pfSense syslog play references it
+# without including that role (role-scope trap, caught by verify_vars.py
+# 2026-09-10 -- the fourth instance).
+so_fleet_host: "{{ hostvars[groups['so_manager'][0]]['so_prod_ip'] }}"
+
+# Port the Elastic pfSense integration listens on, on so-manager. Package
+# default is 9001; the three firewalls are configured to send here as their
+# SECOND syslog destination (pp-syslog remains the first). See the pfSense
+# syslog client play in arbitr_pp_playbook.yaml.
+so_pfsense_syslog_port: 9001
+
+# NO VyOS PORT. Confirmed against the airgapped package registry 2026-09-10:
+# Elastic`s generic `udp` and `tcp` packages are NOT AVAILABLE on this grid,
+# and there is no VyOS vendor integration. VyOS therefore has no route to a
+# parsed dataset by direct send. It continues to reach pp-syslog`s
+# /var/log/remote/ store, which is unchanged. Pending a decision on whether
+# to read that store with a Custom Logs integration instead.

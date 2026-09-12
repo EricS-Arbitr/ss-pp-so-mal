@@ -18,33 +18,82 @@
 # detection content.
 # =========================================================================
 
-- name: Registry content — is it already on the mirror?
+- name: Registry content — inventory the mirror (tars AND checksums)
   ansible.builtin.stat:
     path: "{{ so_mirror_root }}/so-source/{{ item }}"
   register: so_registry_present
   loop:
     - "{{ so_registry_tar_name }}"
     - "{{ so_registry_image_tar_name }}"
+    - "{{ so_registry_tar_name }}.sha256"
+    - "{{ so_registry_image_tar_name }}.sha256"
   loop_control:
     label: "{{ item }}"
 
-- name: Registry content — decide whether a build is needed
+# Three states, not two. A controller can hold complete tars with NO
+# checksums -- exactly what ss-pp-stacked did on 2026-09-08: the tars were
+# built by an earlier run that predated checksum publishing, so the next run
+# saw them, skipped the build, never wrote the .sha256 files, and the
+# 40-manager gate (which waits on the checksums) deadlocked 60 minutes per
+# attempt for three attempts. Checking only the tars cannot see that state.
+- name: Registry content — classify what is present
   ansible.builtin.set_fact:
-    so_registry_needs_build: >-
-      {{ so_registry_present.results | rejectattr('stat.exists') | list | length > 0 }}
+    so_registry_tars_present: >-
+      {{ (so_registry_present.results[0].stat.exists | default(false))
+         and (so_registry_present.results[1].stat.exists | default(false)) }}
+    so_registry_sums_present: >-
+      {{ (so_registry_present.results[2].stat.exists | default(false))
+         and (so_registry_present.results[3].stat.exists | default(false)) }}
+
+- name: Registry content — decide what work is required
+  ansible.builtin.set_fact:
+    # A full build is only needed when the payload itself is missing.
+    so_registry_needs_build: "{{ not so_registry_tars_present }}"
+    # Tars but no checksums: compute them in place. ~1 min against a 7.2 GB
+    # file, versus a multi-hour rebuild of artifacts that are already correct.
+    so_registry_needs_sums: >-
+      {{ so_registry_tars_present and not so_registry_sums_present }}
 
 - name: Registry content — report
   ansible.builtin.debug:
     msg: >-
-      Registry artifacts {{ 'MISSING — will ' + ('download from ' + so_registry_artifact_url
-      if so_registry_artifact_url | length > 0 else 'build from ghcr.io via the proxy')
-      if so_registry_needs_build else 'already present; nothing to do' }}.
+      {{ 'Artifacts complete; nothing to do.' if (so_registry_tars_present and so_registry_sums_present)
+         else ('Tars present but checksums MISSING — generating in place, no rebuild.'
+               if so_registry_needs_sums
+               else 'Artifacts MISSING — will ' + ('download from ' + so_registry_artifact_url
+                    if so_registry_artifact_url | length > 0
+                    else 'build from ghcr.io via the proxy')) }}
+
+# --- Repair path: checksums for artifacts that already exist -------------
+# Deliberately NOT a rebuild. The tars are byte-identical across ranges
+# (7,664,527,360 on both ss-pp-so and ss-pp-stacked), so re-deriving the
+# checksum from what is on disk is correct and costs a minute.
+- name: Registry content — generate missing checksums for existing artifacts
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cd "{{ so_mirror_root }}/so-source"
+    for f in "{{ so_registry_tar_name }}" "{{ so_registry_image_tar_name }}"; do
+      sha256sum "$f" | awk '{print $1}' > "${f}.sha256.part"
+      mv "${f}.sha256.part" "${f}.sha256"
+      chown www-data:www-data "${f}.sha256"
+      chmod 0644 "${f}.sha256"
+      echo "SUM_OK ${f}"
+    done
+  args:
+    executable: /bin/bash
+  register: so_registry_sumgen
+  changed_when: "'SUM_OK' in so_registry_sumgen.stdout"
+  when: so_registry_needs_sums
 
 # --- Path A: prebuilt artifacts (the Nexus end state) --------------------
 # When so_registry_artifact_url is set this is the whole story: two
 # downloads, no docker, no skopeo, no egress to ghcr.io. Switching to it is
 # a one-variable change once Eric has write access to Nexus.
 
+# All FOUR files, checksums included. Fetching only the tars would leave the
+# controller in the tars-without-checksums state that deadlocked
+# ss-pp-stacked on 2026-09-08 -- the repair path above would then have to
+# re-derive checksums Nexus already published.
 - name: Registry content — download prebuilt artifacts
   ansible.builtin.get_url:
     url: "{{ so_registry_artifact_url }}/{{ item }}"
@@ -56,6 +105,8 @@
   loop:
     - "{{ so_registry_tar_name }}"
     - "{{ so_registry_image_tar_name }}"
+    - "{{ so_registry_tar_name }}.sha256"
+    - "{{ so_registry_image_tar_name }}.sha256"
   loop_control:
     label: "{{ item }}"
   when:

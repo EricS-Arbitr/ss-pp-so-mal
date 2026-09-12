@@ -35,7 +35,6 @@ Custom roles currently in `roles/` (those not in the base repo, or that override
 |---|---|
 | `pfsense_firewall` | Drives pfSense 2.8.1 via pfsensible.core (+ php -r shims for what the collection lacks). Configures interfaces, gateways, default-gw pin, outbound-NAT disable, static routes, lab firewall rules, and FRR/BGP. |
 | `syslog_server` | Configures pp-syslog as central rsyslog collector (UDP+TCP 514, per-host files). |
-| `splunk-forwarder` | Overlay of base splunk-forwarder role; extends `lin_inputs.conf.j2` to tail `/var/log/remote/` when host is in `[syslog]`. |
 | `wordpress-pv` | Overlay of base wordpress-pv role; binds container to 127.0.0.1:8080 so host nginx can vhost-route. |
 | `billing_site` | Voltgrid Power customer billing portal (Flask + gunicorn on pp-www). |
 | `voltgrid_site` | Marketing-style site at www.voltgrid.com (sits on pp-www nginx default vhost via wordpress-pv container). |
@@ -43,7 +42,6 @@ Custom roles currently in `roles/` (those not in the base repo, or that override
 | `strip_apipa` | Removes 169.254.x.x addresses Windows assigns when DHCP-then-static handoff lags. |
 | `additional_dc` | Promotes pp-dc02 into the existing voltgrid.com forest (no sibling role in base repo). |
 | `network_discovery` | Suppresses the Win10/11 "Public / Private network" Pop-up + enables network discovery. |
-| `splunk-es` | Overlay of base splunk-es role with custom indices and app installation. |
 
 ## Deploy structure (changed 2026-07-30)
 
@@ -193,28 +191,26 @@ Granularity is per file, not per play: a role used anywhere in a playbook satisf
 Hosts belong to multiple overlapping groups. Group meanings:
 
 - **Platform**: `windows`, `linux` (with `ubuntu22` child), `vyos`, `vyos_routes_only`, `pfsense` — drive OS/device-specific task loading.
-- **Role**: `pdc`, `additional_dc`, `domain_controllers`, `file`, `proxy`, `splunk`, `syslog`, `members`, `corporate_servers`, `dmz`, `infrastructure`, `wordpress-pv`.
+- **Role**: `pdc`, `additional_dc`, `domain_controllers`, `file`, `proxy`, `syslog`, `members`, `corporate_servers`, `dmz`, `infrastructure`, `wordpress-pv`.
 - **Posture**: `ae` (attack emulation hosts — pp-dc01/02, pp-file, pp-sql, pp-mail), `aue` (attack-user-experience workstations).
 - **OS version**: `win10`, `win11`, `winserver2022`, `winserver2019`.
-- **Services**: `splunk-forwarder` (built via `:children`), `global_dns`, `hunt`, `voltgrid:children` (workstations + DCs + corporate_servers).
+- **Services**: `global_dns`, `hunt`, `voltgrid:children` (workstations + DCs + corporate_servers).
 - **Special**: `unmanaged` — hard-coded; not targeted by any play. Contains OT PLCs/HMIs that come pre-configured from their image.
 
 ## Variable hierarchy (lowest → highest precedence)
 
-1. `group_vars/all.yml` — credentials, proxy, Splunk indices, syslog/splunk server IPs.
+1. `group_vars/all.yml` — credentials, proxy, syslog server IP.
 2. `group_vars/<group>.yml` — `linux.yml`, `windows.yml`, `pfsense.yml`, `vyos_routes_only.yml`, `voltgrid.yml`, `proxy.yml`.
 3. `host_vars/<host>.yml` — per-host IPs/interfaces/role-specific tuning.
 4. Inline play vars in `arbitr_pp_playbook.yaml`.
 
 Notable shared variables (defined in `group_vars/all.yml`):
 - `inet_proxy_addr` / `inet_proxy_port` — corporate proxy (10.255.240.1:3128) for any `apt`/`pip`/`win_get_url` traffic.
-- `splunk_server_ip` (`172.16.9.20`), `splunk_forwarder_port` (`9997`).
 - `syslog_server_ip` (`172.16.2.9`) — referenced by the three syslog-client plays.
-- `indices` — Splunk index declarations (linux, windows, netfw, sysmon, proxy, mail).
 
 ## Conventions specific to this overlay
 
-1. **Customer-role workarounds live as plays, not role forks.** If a base role has a bug or gap, the preferred fix is an additional play in `arbitr_pp_playbook.yaml` that compensates after the base role runs. Only fork a role into `roles/<name>/` when the workaround can't be expressed as additional tasks (e.g., `splunk-forwarder` needed template content changes).
+1. **Customer-role workarounds live as plays, not role forks.** If a base role has a bug or gap, the preferred fix is an additional play in `arbitr_pp_playbook.yaml` that compensates after the base role runs. Only fork a role into `roles/<name>/` when the workaround can't be expressed as additional tasks (e.g., `syslog_server`, which had no base role at all).
 
 2. **Every overlay workaround → an UPSTREAM_FIXES.md entry, same turn it lands.** Per `~/.claude/projects/-Users-eric-starace-vCity/memory/feedback_upstream_fixes_log.md`. Standard format: `## YYYY-MM-DD · <severity> · <target path / heading>`, severity = `bug` / `gap` / `enhancement` / `platform`. Each entry has Symptom → Detection (if non-obvious) → Fix (upstream) → Workaround (overlay).
 
@@ -348,7 +344,7 @@ A few things that will save the next session time:
 
 **Add a new Linux host**: create `host_vars/<name>.yml` with `ansible_host`, `network_interfaces`, add to `[ubuntu22]` and any service groups in `hosts`. The Linux pre-config play picks up NM management automatically.
 
-**Add a new SimSpace Splunk index**: append to `group_vars/all.yml`'s `indices:` and run `--tags splunk`.
+**Add a Security Onion Fleet integration**: drop the integration JSON into `/opt/so/saltstack/local/salt/elasticfleet/files/integrations/<policy>/` on so-manager and run `so-elastic-fleet-integration-policy-load`. Salt resolves `local/` ahead of `default/`, so this survives the highstate.
 
 **Forward a new device's syslog to pp-syslog**: VyOS / pfSense are already covered by the platform-targeted plays. For a new Linux host, just adding it to `[linux]` automatically triggers the `Syslog client — Linux` play (excludes `[syslog]` itself).
 
@@ -358,7 +354,7 @@ A few things that will save the next session time:
 
 - Three pfSense firewalls (pp-ot-firewall, pp-internal-firewall, pp-external-firewall) on pfSense 2.8.1 image — auth working with `admin:simspace1`, FRR runtime dir creation fix landed but full FRR convergence pending verification.
 - Routing model: eBGP-only-at-edge (pp-isp-router AS 65002 ↔ pp-external-firewall AS 65001), OSPF between the two upstream firewalls, STATIC everywhere else (all VyOS corp routers carry `remove_vyos_bgp: true`; pp-ot-firewall has neither BGP nor OSPF). Verified against host_vars 2026-07-06.
-- Syslog collection wired end-to-end (Linux → rsyslog forwarder; VyOS → `set system syslog host`; pfSense → `<syslog>` block via php -r) into pp-syslog → Splunk UF → `netfw` index.
+- Syslog collection wired end-to-end (Linux → rsyslog forwarder; VyOS → `set system syslog host`; pfSense → `<syslog>` block via php -r) into pp-syslog's `/var/log/remote/` store. Splunk removed 2026-09-09: that store now feeds no SIEM. Security Onion receives Linux syslog from each host's own Elastic Agent, and pfSense/VyOS via Agent listeners on pp-syslog.
 - GNOME initial-setup wizard suppressed on Linux desktops.
 - DDNS mgmt-IP leakage stripped from AD DNS.
 - Image-baked stale static defaults on VyOS routers cleaned up via `extra_static_routes_remove`.

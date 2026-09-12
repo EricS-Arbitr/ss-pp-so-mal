@@ -13,31 +13,18 @@ inet_proxy_port: "3128"
 # Container name for the global DNS simulator (referenced by handlers role)
 global_dns_container_name: "is-inet"
 
-# Splunk server + forwarder shared config
-splunk_admin: "admin"
-splunk_admin_password: "{{ vault_splunk_admin_password }}"
-splunk_user: "admin"
-splunk_password: "{{ vault_splunk_password }}"
-splunk_server_ip: "172.16.9.20"          # pp-splunk's PP-Security IP
-splunk_forwarder_port: "9997"
-
 # Central syslog collector. All Linux/VyOS/pfSense hosts forward to this IP.
-# pp-syslog runs rsyslog listening on UDP+TCP 514, writes per-host files at
-# /var/log/remote/<hostname>/syslog.log, and the Splunk UF on pp-syslog
-# tails them into Splunk (netfw index for vyos/pfsense, linux for Linux).
+# pp-syslog runs rsyslog listening on UDP+TCP 514 and writes per-host files
+# at /var/log/remote/<hostname>/syslog.log.
+#
+# SPLUNK REMOVED 2026-09-09. Security Onion is the only SIEM on this range.
+# The /var/log/remote/ store now feeds nothing -- deliberately. Linux hosts
+# already ship their own syslog to SO via the Elastic Agent system
+# integration, so relaying the store would land every message in SO twice.
+# Devices that CANNOT run an agent (pfSense, VyOS) dual-send: to :514 here
+# for the store, and to the Elastic Agent listeners on this host, which
+# parse them into SO. See so_fleet_* below.
 syslog_server_ip: "172.16.2.9"           # pp-syslog's PP-Services IP
-
-# Splunk indices created by the splunk role on pp-splunk.
-# Grouped by CIM data model / log volume: Sysmon is split out from
-# the rest of the Windows event logs because of volume + security value.
-indices:
-  - name: "windows"       # All Win event logs (System/Security/Application/Firewall/PowerShell + Sysmon) — matches forwarder template
-  - name: "sysmon"        # Currently unused; forwarder sends Sysmon to "windows". Kept for future split.
-  - name: "linux"         # Linux syslog (also receives Squid until forwarder template is overridden)
-  - name: "netfw"         # Currently unused; reserved for pfsense/vyatta syslog when wired up
-  - name: "proxy"         # Currently unused; Squid goes to "linux" via forwarder template
-  - name: "mail"          # Currently unused; reserved for Exchange when wired up
-
 
 
 # --- Email service (is-inet Postfix/Dovecot/webmail via `email` role) ------
@@ -162,3 +149,24 @@ so_capture_loss_min_acks: 200
 # loss remains unresolved -- see the task comment in playbooks/60-verify.yml.
 # Flip to true once it is fixed, turning this into a regression gate.
 so_capture_loss_fatal: false
+
+# --- Boot-time apt/dpkg lock ----------------------------------------------
+# Ubuntu runs unattended-upgrades on first boot and holds
+# /var/lib/dpkg/lock-frontend for MINUTES. Every apt task before that
+# finishes fails outright, and deploy.sh's three attempts fire seconds apart
+# so all three lose the same race -- a fresh ss-pp-so controller died in
+# 1m22s on 2026-09-10 with all three attempts hitting process 3006
+# (unattended-upgr).
+#
+# 60 x 10s = 10 minutes. Long enough to outlast a first-boot upgrade run,
+# short enough that a genuinely stuck lock still fails the deploy rather
+# than hanging it.
+so_apt_lock_tries: 60
+so_apt_lock_delay: 10
+
+# Mask unattended-upgrades on the ansible controller. Automation-managed
+# range hosts have no use for it, and on an airgapped range it cannot reach
+# anything useful anyway -- all it does is hold the dpkg lock at first boot
+# and lose the deploy. Set false to leave the host's own upgrade schedule
+# alone (the lock wait above still handles the race, just more slowly).
+so_disable_unattended_upgrades: true

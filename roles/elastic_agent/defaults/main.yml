@@ -3,10 +3,12 @@
 
 # Where the installers are served from. so_apt_mirror already runs nginx on
 # the controller; 75-endpoint.yml stages SO's installers into it. Endpoints
-# fetch over the mgmt plane, exactly as they already fetch Chrome, Sysmon and
-# the Splunk forwarder from the in-platform Nexus.
-# The manager, which is where Fleet listens.
-so_fleet_host: "{{ hostvars[groups['so_manager'][0]]['so_prod_ip'] }}"
+# fetch over the mgmt plane, exactly as they already fetch Chrome and Sysmon
+# from the in-platform Nexus.
+# so_fleet_host MOVED to group_vars/all/security_onion.yml 2026-09-10 -- the
+# pfSense syslog play in arbitr_pp_playbook.yaml references it without
+# including this role, and role defaults are role-scoped. verify_vars.py
+# caught it at build time. One source of truth; do not redefine here.
 
 so_agent_mirror_url: "http://{{ so_mirror_host }}/agents"
 
@@ -26,3 +28,14 @@ so_agent_linux_dir: "/opt/so-agent"
 # Proof of enrollment, not proof the installer exited 0.
 so_agent_windows_service: "Elastic Agent"
 so_agent_linux_service: "elastic-agent"
+
+# How long a host waits for Fleet's control port before declaring it
+# unreachable. Was a single 15s window, which failed pp-dmz-dns, pp-dmz-smtp
+# and pp-www on ss-pp-so attempt 1 (2026-09-10) -- all three passed on attempt
+# 2 with no config change, so so-manager simply was not ready yet. That cost
+# 4h47m of a 6h03m deploy.
+#
+# 15s is miserly for a check whose failure aborts the whole run: the downside
+# of waiting is minutes, the downside of failing early is hours. wait_for
+# polls internally, so this is a patience budget, not a fixed sleep.
+so_agent_fleet_wait: 180

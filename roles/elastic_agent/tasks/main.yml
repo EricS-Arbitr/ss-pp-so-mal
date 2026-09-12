@@ -29,6 +29,12 @@
       Write-Output (Test-NetConnection -ComputerName '{{ so_fleet_host }}' -Port 8220 -WarningAction SilentlyContinue).TcpTestSucceeded
   register: fleet_reach_win
   changed_when: false
+  # Test-NetConnection is one shot, so patience has to be added around it --
+  # unlike wait_for, which polls for its whole timeout. Same budget either way.
+  until: "'True' in (fleet_reach_win.output | default([]) | join(' '))"
+  retries: "{{ (so_agent_fleet_wait | int / 15) | int }}"
+  delay: 15
+  failed_when: false
   when: inventory_hostname in groups['windows']
 
 # `wait_for` uses a real Python socket on the target. The previous
@@ -42,7 +48,7 @@
   ansible.builtin.wait_for:
     host: "{{ so_fleet_host }}"
     port: 8220
-    timeout: 15
+    timeout: "{{ so_agent_fleet_wait }}"
     state: started
   register: fleet_reach_lin
   failed_when: false
@@ -54,6 +60,9 @@
     msg: |
       {{ inventory_hostname }} cannot reach {{ so_fleet_host }}:8220, so an
       agent installed here could never enroll.
+
+      This waited {{ so_agent_fleet_wait }}s, so a slow-starting Fleet server
+      has already been ruled out -- treat it as a real path problem.
 
       If this host is on 192.168.100.0/24, the likely cause is pp-ot-firewall,
       which is default-deny and has no rule permitting the OT segment to reach

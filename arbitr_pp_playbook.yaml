@@ -299,6 +299,62 @@
 # sessions/interfaces stay up until reboot. Reboot is required for a
 # fully-clean IPv4-only state. `wait_for` polls the mgmt SSH port from
 # the controller so the deploy resumes cleanly after the box comes back.
+# =============================================================================
+# VyOS — remove the phantom serial console
+# =============================================================================
+# Every VyOS node in this image ships:
+#
+#   set system console device ttyS0 speed '115200'
+#
+# but /dev/ttyS0 is not a working tty on these VMs. systemd starts
+# serial-getty@ttyS0, agetty exits with "/dev/ttyS0: not a tty", systemd
+# restarts it, forever. Measured on pp-ot-router 2026-09-10:
+#
+#   serial-getty@ttyS0.service: Scheduled restart job, restart counter is at 5645
+#
+# One cycle per ~10s, about 16 hours of uptime. Five log lines per cycle
+# across four routers is roughly 200,000 junk messages a day landing in
+# pp-syslog's store -- which is why VyOS syslog looked worthless when we
+# sampled it for SIEM ingestion: the signal is real, it is just buried.
+#
+# Deleted in CONFIG, not masked in systemd. VyOS regenerates unit state from
+# its own configuration, so a `systemctl mask` would be undone by the next
+# commit or boot. Nothing is lost: this console has never worked on this
+# image, so there is no functioning access path to remove.
+#
+# Checked before deleting because VyOS errors on deleting an absent node,
+# which would make a re-run fail rather than no-op.
+- name: VyOS — remove the phantom serial console (systemd restart loop)
+  hosts: vyos:vyos_routes_only:!pp-isp-router
+  gather_facts: false
+  tasks:
+    - name: Check whether the ttyS0 console is configured
+      vyos.vyos.vyos_command:
+        commands:
+          - "show configuration commands | match \"console device ttyS0\""
+      register: vyos_console_cfg
+      changed_when: false
+      failed_when: false
+
+    - name: Delete the ttyS0 console device
+      vyos.vyos.vyos_config:
+        lines:
+          - "delete system console device ttyS0"
+        save: true
+      when: "'ttyS0' in (vyos_console_cfg.stdout | default([''], true) | join(' '))"
+      register: vyos_console_del
+
+    - name: Stop the flapping getty now, so the fix takes effect without a reboot
+      vyos.vyos.vyos_command:
+        commands:
+          - "run sudo systemctl stop serial-getty@ttyS0.service"
+      when: vyos_console_del.changed | default(false)
+      changed_when: true
+      failed_when: false
+  tags:
+    - vyos
+    - vyos_console
+
 - name: Disable IPv6 — VyOS
   hosts: vyos:vyos_routes_only
   gather_facts: false
@@ -388,6 +444,74 @@
     - squid
   tags:
     - squid
+
+# Squid log destination — point it at the Elastic agent, not at files.
+#
+# A play rather than a squid role fork, per the standing convention: base
+# role gaps get compensated after the role runs.
+#
+# Elastic's squid integration is a UDP RECEIVER (confirmed against the
+# package manifest 2026-09-09: squid.log carries input=udp, not logfile), so
+# squid has to send rather than the agent tailing a file. Squid supports a
+# udp:// destination natively, so this goes straight to the agent on
+# loopback.
+#
+# The two log lines this replaces:
+#   access_log /var/log/squid/access.log splunk_json_squid
+#       Splunk-specific JSON. Splunk was removed 2026-09-09; no consumer.
+#   access_log syslog:local2 combined
+#       Went to the host`s own /var/log/syslog, where the system integration
+#       picked it up and shipped it to SO as UNPARSED message text -- the
+#       >=10,000 raw Squid lines found sitting in logs-system.syslog on
+#       2026-09-09. Removing it deletes that duplicate at source; the parsed
+#       copy in logs-squid.log-* replaces it with real fields.
+#
+# Squid`s own system messages still reach pp-syslog via the host`s `*.*`
+# rsyslog forward. Only the ACCESS log stops going there.
+- name: Squid — send access log to the Elastic agent instead of files/syslog
+  hosts: proxy
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Remove the Splunk-format access_log line
+      ansible.builtin.lineinfile:
+        path: /etc/squid/squid.conf
+        regexp: '^access_log\s+/var/log/squid/access\.log\s+splunk_json_squid'
+        state: absent
+      register: squid_rm_splunk
+
+    - name: Remove the syslog access_log line (duplicate into system.syslog)
+      ansible.builtin.lineinfile:
+        path: /etc/squid/squid.conf
+        regexp: '^access_log\s+syslog:local2'
+        state: absent
+      register: squid_rm_syslog
+
+    - name: Send the access log to the Elastic agent over loopback UDP
+      ansible.builtin.lineinfile:
+        path: /etc/squid/squid.conf
+        regexp: '^access_log\s+udp://'
+        line: "access_log udp://127.0.0.1:9537 squid"
+        insertafter: '^#?\s*access_log'
+        state: present
+      register: squid_add_udp
+
+    # Reload, not restart: squid re-reads config without dropping in-flight
+    # client connections, and the range has live user emulation against it.
+    - name: Reload squid if the log destinations changed
+      ansible.builtin.command: squid -k reconfigure
+      when: squid_rm_splunk.changed or squid_rm_syslog.changed or squid_add_udp.changed
+      changed_when: true
+
+    # Positive proof the line is actually in force, not merely in the file.
+    - name: Confirm squid is running with the udp destination
+      ansible.builtin.command: grep -c "^access_log udp://127.0.0.1:9537 squid" /etc/squid/squid.conf
+      register: squid_udp_check
+      changed_when: false
+      failed_when: squid_udp_check.rc != 0
+  tags:
+    - squid
+    - squid_logging
 
 - name: wordpress-pv
   hosts: wordpress-pv
@@ -697,17 +821,6 @@
     - chrome
     - autologin
 
-- name: splunk server
-  hosts: splunk
-  gather_facts: true
-  become: true
-  roles:
-    - splunk
-    - splunk-es
-  tags:
-    - splunk
-    - splunk-es
-
 - name: global_dns
   hosts: global_dns
   gather_facts: true
@@ -739,8 +852,18 @@
 
 # Central syslog collector. pp-syslog runs rsyslog listening on UDP+TCP
 # 514 and writes per-host files at /var/log/remote/<hostname>/syslog.log.
-# Splunk UF on the same host (deployed by the splunk-forwarder play below)
-# tails those files into Splunk via the custom lin_inputs.conf.j2 overlay.
+#
+# Splunk was removed 2026-09-09. This file store is now a LOCAL ARTIFACT
+# ONLY -- nothing tails it into a SIEM, deliberately. Every Linux host
+# already ships its own syslog to Security Onion via the Elastic Agent
+# system integration, so relaying /var/log/remote/ would put every message
+# in SO twice by two different routes.
+#
+# The store is kept because it is a realistic enterprise construct and a
+# plausible attacker target. Network gear that CANNOT run an agent
+# (pfSense, VyOS) reaches SO by a separate path: those devices dual-send,
+# to :514 here for this store and to the Elastic Agent listeners on this
+# same host for SO. See the pfSense/VyOS syslog client plays below.
 - name: Syslog collector — pp-syslog
   hosts: syslog
   gather_facts: true
@@ -752,8 +875,14 @@
     - syslog_server
 
 # Linux client config: drop a snippet that forwards everything to pp-syslog
-# over UDP/514. Local /var/log/syslog still gets the messages too; the
-# remote copy is what Splunk UF (on pp-syslog) ships to Splunk.
+# over UDP/514. Local /var/log/syslog still gets the messages too.
+#
+# KEPT after Splunk's removal, deliberately. The remote copy now feeds
+# nothing -- it populates pp-syslog's /var/log/remote/ store, which is a
+# realistic enterprise construct and a plausible attacker target, not a SIEM
+# path. Security Onion gets Linux syslog from the LOCAL copy instead, via
+# each host's own Elastic Agent system integration. Relaying the store as
+# well would put every Linux message in SO twice by two routes.
 - name: Syslog client — Linux
   hosts: linux:!syslog
   gather_facts: false
@@ -793,7 +922,11 @@
   hosts: vyos:vyos_routes_only:!pp-isp-router
   gather_facts: false
   tasks:
-    - name: Configure remote syslog host
+    # NOT YET dual-sending. Elastic`s generic `udp` and `tcp` packages are
+    # NOT in this grid`s airgapped registry (checked 2026-09-10) and there is
+    # no VyOS vendor integration, so there is nowhere on the SO side for a
+    # second destination to land. VyOS reaches pp-syslog only, for now.
+    - name: Configure remote syslog host (pp-syslog store)
       vyos.vyos.vyos_config:
         match: line
         lines:
@@ -820,9 +953,14 @@
                 $cur = config_get_path("syslog", []);
                 $changed = false;
                 $desired = [
-                  "remoteserver" => $target,
-                  "ipproto"      => "ipv4",
-                  "logall"       => true,
+                  "remoteserver"  => $target,
+                  // Explicitly CLEARED, not merely unmanaged. A stale
+                  // remoteserver2 from the abandoned dual-send would start
+                  // double-sending the moment pfSense stopped collapsing
+                  // same-address entries. Empty reads as unset.
+                  "remoteserver2" => "",
+                  "ipproto"       => "ipv4",
+                  "logall"        => true,
                   "enable"       => true,
                 ];
                 foreach ($desired as $k => $v) {
@@ -845,21 +983,23 @@
                 }'
       environment:
         PFS_SYSLOG_SRV: "{{ syslog_server_ip }}"
+        # NO remoteserver2. The firewalls send ONCE, to :514 here.
+        #
+        # A second destination on :9001 was tried and pfSense ignores it
+        # when both entries point at the same address (tcpdump on pp-syslog,
+        # 2026-09-10: steady :514, zero :9001). It DID work while the second
+        # target was a different host, so pfSense appears to collapse remote
+        # syslog entries by address.
+        #
+        # pp-syslog now fans out locally instead -- rsyslog forwards firewall
+        # messages to 127.0.0.1:9001 for the Elastic pfSense integration,
+        # preserving the original hostname. See
+        # roles/syslog_server/templates/31-fleet-forward.conf.j2.
       register: pfsense_syslog_cfg
       changed_when: "'CHANGED' in pfsense_syslog_cfg.stdout"
   tags:
     - syslog
     - syslog_client
-
-- name: splunk forwarder
-  hosts: splunk-forwarder
-  gather_facts: true
-  become: true
-  roles:
-    - role: splunk-forwarder
-      when: splunk_server_ip is defined
-  tags:
-    - splunk-forwarder
 
 # =============================================================================
 # Management plane carries NO AD traffic — enforced, not assumed

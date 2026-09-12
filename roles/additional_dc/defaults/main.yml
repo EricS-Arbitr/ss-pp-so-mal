@@ -1,0 +1,11 @@
+---
+
+# How long to wait for a domain controller to become LOCATABLE before
+# attempting promotion. 40 x 15s = 10 minutes.
+#
+# pp-dc03 sits across the ESP boundary -- OT subnet -> pp-ot-router ->
+# pp-ot-firewall -> pp-internal-router -> pp-dc01 at 172.16.2.7 -- so it has
+# strictly more to wait for than pp-dc02 on the corporate side, and it is the
+# one that fails. Its DNS is correctly configured; the path simply is not
+# ready yet when the play reaches it.
+additional_dc_locate_retries: 40

@@ -2,12 +2,13 @@
 # Security Onion — blueprint additions (APPLIED as ARBITR_PP_1455)
 # =========================================================================
 # Paste these entries into the `resources:` list of the PowerPlant
-# blueprint. Format matches the existing `pp-splunk` entry (the closest
-# analog: an Ubuntu appliance on pp-security with explicit sizing).
+# blueprint. Format matches the other Ubuntu appliances on pp-security --
+# an appliance entry with explicit sizing.
 #
 # IP ALLOCATIONS — verified against ARBITR_PP_1328.yml 2026-07-30
 #   pp-security (172.16.9.0/24) in use: .1 pp-internal-router,
-#                                       .11 win-hunt-1, .20 pp-splunk
+#                                       .11 win-hunt-1
+#   (.20 was pp-splunk; freed when Splunk was removed 2026-09-09)
 #   mgmt 10.255.240.x: 57 addresses in use between .101 and .208
 #                      per the blueprint
 #
@@ -27,8 +28,8 @@
 # =========================================================================
 
 # --- Manager -------------------------------------------------------------
-# Salt master + Elasticsearch + Kibana + SOC + kratos + Fleet. Sized to
-# match pp-splunk; this is the heaviest node in the stack.
+# Salt master + Elasticsearch + Kibana + SOC + kratos + Fleet. 16 vCPU /
+# 32 GB -- the heaviest node in the stack.
 - type: "range.resource.primitive.VmInstance::1.0.0"
   name: "so-manager"
   properties:
@@ -118,7 +119,7 @@
 # =========================================================================
 # SIZING NOTE
 # =========================================================================
-# Manager/search match pp-splunk (16 vCPU / 32 GB). Sensors are proposed at
+# Manager/search are 16 vCPU / 32 GB. Sensors are proposed at
 # 8 vCPU / 16 GB rather than the dev range's 16/32, to keep the total
 # addition to 56 vCPU / 112 GB across five VMs.
 #

@@ -381,62 +381,52 @@ for src in pp-internal-router site-edge-router pp-corp-router \
 done
 
 # =========================================================================
-# 7. SOC tier — Splunk SIEM
+# 7. SOC tier — Security Onion data arrival
 # =========================================================================
-section "7. SOC tier — Splunk SIEM"
+# Splunk was removed 2026-09-09; SO is the only SIEM on this range. These
+# checks replace the old Splunk block one-for-one in intent, but assert a
+# stronger thing: that documents ARE LANDING in each dataset.
+#
+# Enrollment is not arrival. 75-endpoint.yml already proves Fleet knows every
+# hostname, and an agent can be enrolled, healthy and shipping nothing --
+# the same enrollment-vs-data trap that hid the empty registry and the
+# discarded Zeek frames. Count documents instead.
+#
+# _count rather than _cat/indices: one JSON number per data stream, immune to
+# backing-index rollover splitting the answer across rows.
+section "7. SOC tier — Security Onion data arrival"
 
-check_pf_shell pp-splunk \
-  'systemctl is-active Splunkd || systemctl is-active splunk' \
-  'active' \
-  "pp-splunk indexer service active"
+check_pf_shell so-manager \
+  'n=$(so-elasticsearch-query "logs-windows.sysmon_operational-default/_count" 2>/dev/null | grep -o "\"count\":[0-9]*" | cut -d: -f2); [ -n "$n" ] && [ "$n" -gt 0 ] && echo OK_$n || echo NONE' \
+  'OK_' \
+  "SO: Sysmon events arriving (logs-windows.sysmon_operational)"
 
-check_pf_shell pp-splunk \
-  'ss -lnt | grep -qE ":9997\\b" && echo OK_9997 || echo MISSING_9997' \
-  'OK_9997' \
-  "pp-splunk listening on :9997 (UF receiver)"
+check_pf_shell so-manager \
+  'n=$(so-elasticsearch-query "logs-endpoint.events.process-default/_count" 2>/dev/null | grep -o "\"count\":[0-9]*" | cut -d: -f2); [ -n "$n" ] && [ "$n" -gt 0 ] && echo OK_$n || echo NONE' \
+  'OK_' \
+  "SO: Elastic Defend process events arriving (logs-endpoint.events.process)"
 
-check_pf_shell pp-splunk \
-  'ss -lnt | grep -qE ":8000\\b" && echo OK_8000 || echo MISSING_8000' \
-  'OK_8000' \
-  "pp-splunk listening on :8000 (Splunk Web)"
+check_pf_shell so-manager \
+  'n=$(so-elasticsearch-query "logs-system.syslog-default/_count" 2>/dev/null | grep -o "\"count\":[0-9]*" | cut -d: -f2); [ -n "$n" ] && [ "$n" -gt 0 ] && echo OK_$n || echo NONE' \
+  'OK_' \
+  "SO: Linux syslog arriving (logs-system.syslog)"
 
-check_pf_shell pp-splunk \
-  'ss -lnt | grep -qE ":8089\\b" && echo OK_8089 || echo MISSING_8089' \
-  'OK_8089' \
-  "pp-splunk listening on :8089 (Splunk REST/mgmt)"
+check_pf_shell so-manager \
+  'n=$(so-elasticsearch-query "logs-zeek-so/_count" 2>/dev/null | grep -o "\"count\":[0-9]*" | cut -d: -f2); [ -n "$n" ] && [ "$n" -gt 0 ] && echo OK_$n || echo NONE' \
+  'OK_' \
+  "SO: Zeek network metadata arriving (logs-zeek-so)"
 
-# pp-syslog UF forwarding /var/log/remote/* -- catches "UF running but no
-# ESTABLISHED conn to indexer" silent break.
-check_pf_shell pp-syslog \
-  'systemctl is-active SplunkForwarder' \
-  'active' \
-  "pp-syslog SplunkForwarder service active"
+# Fleet enrollment count. Complements the per-host assertion in
+# 75-endpoint.yml -- this catches a grid that lost agents between deploys.
+check_pf_shell so-manager \
+  'n=$(so-elasticsearch-query ".fleet-agents/_count" 2>/dev/null | grep -o "\"count\":[0-9]*" | cut -d: -f2); [ -n "$n" ] && [ "$n" -ge 40 ] && echo OK_$n || echo LOW_${n:-0}' \
+  'OK_' \
+  "SO: >= 40 Elastic Agents enrolled in Fleet"
 
-check_pf_shell pp-syslog \
-  'c=$(ss -ant | grep "172.16.9.20:9997" | grep -c ESTAB); [ "$c" -ge 1 ] && echo OK_ESTAB || echo NO_ESTAB' \
-  'OK_ESTAB' \
-  "pp-syslog UF has ESTABLISHED connection to indexer :9997"
-
-# Total forwarder count -- Linux UFs (~5) + Windows UFs (~40+) once
-# the rollout is done. Floor 30 confirms the Windows batch landed.
-check_pf_shell pp-splunk \
-  'c=$(ss -ant | grep ":9997 " | grep -c ESTAB); [ "$c" -ge 30 ] && echo "OK_UFS_$c" || echo "LOW_UFS_$c"' \
-  'OK_UFS_' \
-  "pp-splunk: >= 30 UFs ESTABLISHED on :9997 (Linux + Windows rollout done)"
-
-# Windows UF service spot check on one workstation + one DC.
-check_ps pp-bp-wkstn-1 \
-  '(Get-Service SplunkForwarder -ErrorAction SilentlyContinue).Status' \
-  '\(stdout\)[[:space:]]+Running' \
-  "pp-bp-wkstn-1: SplunkForwarder service running"
-
-check_ps pp-dc01 \
-  '(Get-Service SplunkForwarder -ErrorAction SilentlyContinue).Status' \
-  '\(stdout\)[[:space:]]+Running' \
-  "pp-dc01: SplunkForwarder service running"
-
-# Sysmon spot check -- proves the sysmon role landed the config +
-# started Sysmon64 service. Sysmon events land in index=windows via UF.
+# Sysmon spot check -- proves the sysmon role landed the config + started
+# the Sysmon64 service. The EVENTS are asserted in section 7 above, which
+# counts documents in logs-windows.sysmon_operational; this only proves the
+# producer is running on a representative host.
 check_ps pp-bp-wkstn-1 \
   '(Get-Service Sysmon64 -ErrorAction SilentlyContinue).Status' \
   '\(stdout\)[[:space:]]+Running' \

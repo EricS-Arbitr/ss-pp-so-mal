@@ -1,0 +1,34 @@
+---
+# =========================================================================
+# 80-fleet-integrations.yml — host-scoped log sources into Security Onion
+# =========================================================================
+# Splunk was removed 2026-09-09 and SO is the only SIEM on this range. Log
+# sources that used to reach Splunk through a universal forwarder now reach
+# SO through Elastic integrations, parsed into proper datasets rather than
+# raw syslog text.
+#
+#   nginx  (pp-www)    -> logs-nginx.access-*  / logs-nginx.error-*
+#                         both sites front through one nginx:
+#                         billing.voltgrid.com -> gunicorn:5000
+#                         default_server       -> WordPress:8080
+#   squid  (pp-proxy)  -> logs-squid.log-*
+#
+# ORDERING: MUST run after 75-endpoint.yml. Enrolment puts every endpoint on
+# `endpoints-initial` because the token baked into SO's installer decides the
+# policy; this phase moves the two target hosts onto dedicated policies
+# afterwards. Run before enrolment and there is no agent to reassign.
+#
+# Runs on so-manager, not on the log-producing hosts: Fleet is configured
+# centrally through the API, and the agents pick the change up at check-in.
+# =========================================================================
+
+- name: Fleet integrations — host-scoped log sources
+  hosts: so_manager
+  become: true
+  gather_facts: false
+  roles:
+    - so_fleet_integrations
+  tags:
+    - so
+    - fleet
+    - fleet_integrations

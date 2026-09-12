@@ -12,9 +12,9 @@
 # fast land in Elasticsearch ahead of the sensor data and make correlation
 # meaningless. Run the clock fix first; site.yml orders it that way.
 #
-# NOTE ON SPLUNK: these hosts already run the Splunk universal forwarder to
-# pp-splunk. Elastic Agent is additive, not a replacement -- the range keeps
-# endpoint telemetry in both stacks.
+# NOTE: Security Onion is the ONLY SIEM on this range as of 2026-09-09.
+# Splunk and its universal forwarders were removed, so Elastic Agent is now
+# the sole endpoint telemetry path rather than one of two.
 # =========================================================================
 
 # --- Sysmon ---------------------------------------------------------------
@@ -81,9 +81,9 @@
 # https://<manager>/packages/, but that path returns 503 on this grid, and
 # pointing 44 hosts at the manager would have it serving ~8.5 GB while it is
 # also ingesting from three sensors. The controller already runs nginx for
-# so_apt_mirror, and endpoints already fetch Chrome, Sysmon and the Splunk
-# forwarder over the mgmt plane from the in-platform Nexus -- this is the
-# same delivery path they already use.
+# so_apt_mirror, and endpoints already fetch Chrome and Sysmon over the mgmt
+# plane from the in-platform Nexus -- this is the same delivery path they
+# already use.
 - name: Stage the Elastic Agent installers on the controller mirror
   hosts: ansible_controller
   # NO become. Nothing here needs root: so_apt_mirror creates the agents dir
