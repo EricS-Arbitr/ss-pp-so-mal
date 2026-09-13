@@ -1,0 +1,102 @@
+# =========================================================================
+# Malcolm — blueprint addition (PROPOSED, not yet applied)
+# =========================================================================
+# Paste this entry into the `resources:` list of the ss-pp-so-mal blueprint.
+# Format matches docs/security-onion/blueprint-additions.yml -- the same
+# vocabulary the existing entries use, nothing invented.
+#
+# PLACEMENT: PP-OT-DMZ, which ALREADY EXISTS and is empty.
+#   pp-ot-firewall vmx3, descr "OT_DMZ", gateway 192.168.90.129/27
+#   usable .130-.158, nothing assigned as of 2026-09-13
+# The range was designed with a Level 3.5 enclave and never given a tenant.
+#
+# WHY THERE, and not deeper in OT:
+#   * Passive capture does not require residency. pp-ot-router PUSHES the
+#     GRE mirror; Malcolm never initiates toward OT.
+#   * Malcolm is a large web-facing stack (nginx, Keycloak, OpenSearch,
+#     NetBox, PostgreSQL). That belongs in a DMZ, not at L2 beside the DCS
+#     controller.
+#   * It SHORTENS the current conduit. Today the OT mirror crosses
+#     pp-ot-firewall and lands on so-sensor-ot at 172.16.9.41 -- on the
+#     CORPORATE security subnet. Moving the consumer into PP-OT-DMZ stops
+#     raw OT traffic crossing into corporate at all.
+#
+# IP ALLOCATIONS — verify against the CURRENT blueprint before applying.
+# The Security Onion addition learned this the hard way: its first draft
+# checked a stale local copy and missed that is-inet had moved.
+#   PP-OT-DMZ 192.168.90.128/27 : .129 pp-ot-firewall (gateway), rest free
+#   mgmt 10.255.240.x           : .209/.210/.211 free as of 2026-09-13
+#                                 (.208 and .212 in use)
+# =========================================================================
+
+- type: "range.resource.primitive.VmInstance::1.0.0"
+  name: "pp-ot-malcolm"
+  properties:
+    # Same image as the SO nodes, deliberately: it puts this host in
+    # [ubuntu22] -> [linux], so it inherits group_vars/linux.yml credentials
+    # and the existing baseline roles without a special case.
+    image: "global/RDP_Ubuntu_Desktop_22.04.5:1.1.0"
+    # Malcolm's own floor is 8 vCPU / 24 GB; 16/32 is what its developers
+    # recommend. This host also absorbs everything so-sensor-ot does today
+    # (Zeek + Suricata) ON TOP of OpenSearch, Arkime, Logstash, NetBox,
+    # Keycloak and PostgreSQL. The minimum would run, badly.
+    cpuCount: 16
+    memory: "32768"
+    # UNITS: expressed in MB to match `memory` above (32768 = 32 GB).
+    # Confirm the platform reads it the same way before applying -- if
+    # diskSize is GB, this wants 600, not 614400.
+    #
+    # 600 GB = ~100 GB OS + container images, ~500 GB Malcolm data.
+    #   images : 23 of them, stored UNPACKED by Docker. SO's 22-image set is
+    #            7.2 GB compressed and ~28 GB on disk; Malcolm's is heavier.
+    #   data   : OpenSearch indices + Arkime full-packet retention. Arkime is
+    #            the component with unbounded appetite and dominates this
+    #            number -- it is the easiest dial to turn if 600 is too much.
+    #
+    # A SEPARATE data volume would be better than one large root: on a single
+    # volume a full PCAP store takes the OS down with it. If the blueprint
+    # supports a second disk, split it 100 + 500 and mount the second at
+    # /opt/malcolm/data. One disk works; it is just less forgiving.
+    diskSize: "614400"
+    networkInterfaces:
+    # NAME MUST MATCH the blueprint's own name for the PP-OT-DMZ segment --
+    # the one pp-ot-firewall vmx3 gateways at 192.168.90.129/27. Confirm it
+    # rather than trusting this string.
+    - name: "pp-ot-dmz"
+      ipAddress: "192.168.90.130"
+      prefix: 27
+    managementInterface:
+      ipAddress: "10.255.240.210"
+      position: "FIRST"
+
+# =========================================================================
+# STORAGE — NOT EXPRESSIBLE IN THE VOCABULARY ABOVE
+# =========================================================================
+# No existing entry in this blueprint sets a disk property; storage comes
+# from the image. Malcolm needs considerably more than the SO nodes, so this
+# has to be raised with the platform team rather than encoded here:
+#
+#   OS + container images : ~100 GB
+#       23 images. Docker stores them UNPACKED -- SO's 22-image set is
+#       7.2 GB compressed and ~28 GB on disk, and Malcolm's set is heavier.
+#
+#   Malcolm data          : ~500 GB, ideally a SEPARATE volume
+#       OpenSearch indices plus Arkime full-packet retention. Arkime is the
+#       one component with unbounded appetite; on a single volume a full
+#       PCAP store takes the OS with it. /nsm on the SO nodes sits on the
+#       root LV and works, right up until it would not.
+#
+# 500 GB is a starting point and the easiest dial to turn -- it is dominated
+# by PCAP retention, not by Malcolm itself.
+#
+# =========================================================================
+# CONSEQUENCE TO DECIDE BEFORE THIS LANDS: so-sensor-ot
+# =========================================================================
+# Malcolm replaces so-sensor-ot as the consumer of pp-ot-router's GRE mirror
+# (option C, agreed 2026-09-09). That sensor then has NO traffic, and the
+# range's own checks will say so on every deploy -- 60-verify asserts each
+# sensor captures packets, and verify_so.sh expects three healthy sensors.
+#
+# Decommission it, or repoint it at a segment with no sensor today. Leaving
+# it idle guarantees red checks on every build, which is the one option that
+# is definitely wrong.
