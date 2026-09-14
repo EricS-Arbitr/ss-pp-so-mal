@@ -42,9 +42,20 @@
     # Keycloak and PostgreSQL. The minimum would run, badly.
     cpuCount: 16
     memory: "32768"
-    # UNITS: expressed in MB to match `memory` above (32768 = 32 GB).
-    # Confirm the platform reads it the same way before applying -- if
-    # diskSize is GB, this wants 600, not 614400.
+    # !! UNRESOLVED: diskSize DID NOT TAKE EFFECT on the first attempt.
+    # Tested 2026-09-14 with a value in the MB convention: the VM came up
+    # with the image's NATIVE 100 GB disk --
+    #     sda 100G -> sda3 99G LVM2_member -> ubuntu--vg-ubuntu--lv 99G /
+    # The DEVICE is 100 GB, so this is not a partition-growth problem and
+    # growpart/lvextend cannot help; there is no unallocated space.
+    #
+    # Either the units are wrong (try "700" for GB rather than MB), or
+    # diskSize is not honoured for VmInstance::1.0.0 and the size must come
+    # from a separate disk resource or a larger-native-disk image. Resolve
+    # with the platform team before relying on this field.
+    #
+    # 100 GB WILL run Malcolm but will not hold PCAP: Arkime's retention is
+    # the unbounded component and fills whatever it is given.
     #
     # 600 GB = ~100 GB OS + container images, ~500 GB Malcolm data.
     #   images : 23 of them, stored UNPACKED by Docker. SO's 22-image set is
@@ -57,7 +68,7 @@
     # volume a full PCAP store takes the OS down with it. If the blueprint
     # supports a second disk, split it 100 + 500 and mount the second at
     # /opt/malcolm/data. One disk works; it is just less forgiving.
-    diskSize: "614400"
+    diskSize: "700"
     networkInterfaces:
     # NAME MUST MATCH the blueprint's own name for the PP-OT-DMZ segment --
     # the one pp-ot-firewall vmx3 gateways at 192.168.90.129/27. Confirm it
