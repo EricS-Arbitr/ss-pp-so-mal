@@ -114,9 +114,10 @@
   changed_when: >
     'INIT_GW_PINNED' in (init_gw_arp.stdout | default('')) or
     'INIT_GW_REPAIRED_AND_PINNED' in (init_gw_arp.stdout | default(''))
-  # Never fatal: the play carries any_errors_fatal, so failing here for one
-  # host stops all 45, and a host that cannot route fails a later precondition
-  # that reports it far better than init can.
+  # Never fatal: a host that cannot route fails a later precondition that
+  # reports it far better than init can. (Until 2026-09-15 this also had to
+  # absorb the play's any_errors_fatal, which would have stopped all 45 for
+  # one host; that flag is gone, but non-fatal is still correct here.)
   failed_when: false
 
 # Surfaced deliberately. A repair nobody sees is indistinguishable from the
