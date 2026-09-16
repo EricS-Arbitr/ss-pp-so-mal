@@ -377,8 +377,6 @@ for i in $(seq 1 $MAX_ATTEMPTS); do
 	# Attempt 2 gets the retry-file scope IF the previous attempt actually
 	# produced one. If the file is missing (e.g. deploy exited on a global
 	# error before writing it), fall through to the full sweep.
-	if [ $i -eq 2 ] && [ -f "$RETRY_FILE" ]; then
-		echo "=== Attempt $i (retry-file scope — failed hosts only) ==="
 	# STDERR IS MERGED INTO STDOUT DELIBERATELY.
 	#
 	# ss-pp-stacked 2026-09-02: all three attempts failed in ~2 seconds and
@@ -392,18 +390,42 @@ for i in $(seq 1 $MAX_ATTEMPTS); do
 	# Merging here rather than taking over logging with `exec > >(tee ...)`:
 	# the caller already owns the redirect, and a second writer to the same
 	# file interleaves badly.
+
+	# A CLEAN REPAIR PASS IS NOT A DEPLOYED RANGE. This deliberately never
+	# breaks out of the loop, however well it goes.
+	#
+	# The retry file lists the hosts that FAILED. Running the playbook limited
+	# to them repairs those hosts -- but every play whose targets were dropped
+	# when they failed still has not run. airfield 2026-09-15: bs-dc01 (sole
+	# member of [pdc_blackstone]) failed on an ADWS race in attempt 1, so
+	# Create Users, dns and BOTH domain joins lost their target and the SO
+	# phases never started. Attempt 2 scoped to bs-dc01 fixed bs-dc01, passed,
+	# and deploy.sh reported "Success on attempt 2" over a range with no
+	# domain joins and no Security Onion.
+	#
+	# So the repair pass REPAIRS, and attempt 3's full sweep is what confirms
+	# the range.
+	#
+	# Reachable only since 2026-09-15: before the RETRY_FILE path was fixed
+	# the -f guard never matched, so attempt 2 was always a full sweep and
+	# "success on attempt 2" really did mean a full sweep had passed.
+	if [ $i -eq 2 ] && [ -f "$RETRY_FILE" ]; then
+		echo "=== Attempt $i (retry-file scope — REPAIR PASS over failed hosts) ==="
 		if ansible-playbook $PLAYBOOK --forks $FORKS --limit @"$RETRY_FILE" "$@" 2>&1; then
-			echo "Success on attempt $i (retry scope) after $(fmt_elapsed $(($(date +%s) - ATTEMPT_START)))"
-			DEPLOY_RESULT="SUCCESS on attempt $i (retry scope)"
-			break
+			echo "Repair pass clean after $(fmt_elapsed $(($(date +%s) - ATTEMPT_START)))"
+			echo "NOT declaring success — a full sweep must confirm the range"
+		else
+			echo "Attempt $i failed after $(fmt_elapsed $(($(date +%s) - ATTEMPT_START)))"
 		fi
-	else
-		echo "=== Attempt $i (full sweep) ==="
-		if ansible-playbook $PLAYBOOK --forks $FORKS "$@" 2>&1; then
-			echo "Success on attempt $i after $(fmt_elapsed $(($(date +%s) - ATTEMPT_START)))"
-			DEPLOY_RESULT="SUCCESS on attempt $i"
-			break
-		fi
+		rm -f "$RETRY_FILE"
+		continue
+	fi
+
+	echo "=== Attempt $i (full sweep) ==="
+	if ansible-playbook $PLAYBOOK --forks $FORKS "$@" 2>&1; then
+		echo "Success on attempt $i after $(fmt_elapsed $(($(date +%s) - ATTEMPT_START)))"
+		DEPLOY_RESULT="SUCCESS on attempt $i"
+		break
 	fi
 
 	echo "Attempt $i failed after $(fmt_elapsed $(($(date +%s) - ATTEMPT_START)))"

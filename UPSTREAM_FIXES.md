@@ -11,6 +11,20 @@ Severity key:
 
 
 
+## 2026-09-16 · bug · deploy.sh — a clean retry-scoped pass reported success over an unbuilt range
+
+**Symptom.** Attempt 1 failed, attempt 2 ran retry-scoped and passed, and deploy.sh exited 0 with `Success on attempt 2 (retry scope)`. The range had no domain joins and no Security Onion.
+
+**Root cause.** The retry file lists the hosts that FAILED. Running the playbook limited to them repairs those hosts, but every play whose targets were dropped when they failed still has not run. On airfield 2026-09-15, bs-dc01 — sole member of `[pdc_blackstone]` — failed on an ADWS race in attempt 1, so `Create Users`, `dns` and BOTH domain joins lost their target and the SO phases never started. Attempt 2 scoped to bs-dc01 fixed bs-dc01, passed, and the loop `break`ed on that success. A repair was mistaken for a deployment.
+
+**Detection.** Eric noticed the second attempt was suspiciously short, doubted that every play had run, and re-ran deploy.sh by hand — the full sweep then passed and built everything attempt 2 had skipped. Nothing in the script's output distinguished the two states.
+
+**Reachable only since 2026-09-15.** Before the `RETRY_FILE` path was fixed the `-f` guard never matched, so attempt 2 was always a full sweep and "success on attempt 2" genuinely meant a full sweep had passed. Correcting the retry path opened this hole behind it.
+
+**Fix (overlay).** The retry-scoped attempt is now a REPAIR PASS that never breaks out of the loop however well it goes. It reports `Repair pass clean — NOT declaring success`, clears the retry file and `continue`s, so attempt 3's full sweep is what actually confirms the range. This automates precisely the manual re-run that caught it.
+
+---
+
 ## 2026-09-15 · bug · Init play — `any_errors_fatal: true` turned 4 unreachable hosts into 48
 
 **Symptom.** A fresh airfield-range deploy built the Linux side and the whole Security Onion grid, then failed 4.5 hours later at `75-endpoint`'s Fleet coverage check with all 48 Windows hosts missing. The recap showed 44 of them at `ok=2, changed=0, skipped=0, failed=0, unreachable=0` — they had completed init's two tasks and then been offered nothing else for the rest of the run. Four hosts showed `ok=1, unreachable=1`.
