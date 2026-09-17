@@ -24,3 +24,20 @@ init_gw_arp_blocklist:
   - "00-50-56-98-7D-D7"
 # How many flush/re-probe cycles before giving up and reporting INIT_GW_FAIL.
 init_gw_arp_attempts: 6
+
+# Off-subnet addresses the gateway-ARP check may probe, tried before the
+# host's own DNS servers. Needed because DNS is NOT reliably off-subnet -- on
+# airfield 2026-09-17 the Services segment held both the file servers and
+# their DCs, so pinging DNS never crossed the gateway and the check pinned a
+# black-hole MAC as Permanent, isolating the host.
+#
+# The check verifies each candidate is genuinely off-subnet against the host's
+# own addresses, and refuses to pin at all when none is: an unpinned gateway
+# is the status quo, a wrongly pinned one is an isolated host.
+#
+# so-manager first -- 172.16.9.x is off-subnet for every Windows segment here
+# (172.16.2-6.x). pp-syslog is on 172.16.2.0/24, so it is correctly skipped
+# for hosts in that segment and used for the rest.
+init_gw_probe_targets:
+  - "172.16.9.30"      # so-manager
+  - "172.16.2.9"       # pp-syslog

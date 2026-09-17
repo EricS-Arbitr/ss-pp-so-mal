@@ -11,6 +11,22 @@ Severity key:
 
 
 
+## 2026-09-17 · bug · init gateway-ARP repair could pin a black-hole MAC
+
+**Symptom (measured on airfield 2026-09-17, latent here).** A host ends up with its default gateway pinned as `Permanent` to `00-00-00-00-00-00`. Nothing routes off-subnet, ARP can never re-learn past it, and every off-subnet operation fails — Fleet enrolment, domain join, DNS. On airfield this failed three full deploy attempts on one host of 86.
+
+**Root cause, two compounding defects.**
+
+1. *The validity test accepted a sentinel.* `if (-not $mac -or ($blocked -contains $mac))` treats `00-00-00-00-00-00` as a real address: non-empty, not blocklisted. Windows returns exactly that MAC for an `Incomplete` neighbour — the state a failed re-probe leaves behind — so the repair loop manufactures the value it then trusts and pins.
+
+2. *The routing proof did not prove routing.* `Routes` pinged the first configured DNS server on the stated assumption that DNS is off-subnet "in every range these roles serve". That assumption is not guaranteed: on airfield the Services segment held both the file servers and their DCs, so the ping never crossed the gateway. And `if (-not $dns) { return $true }` returned SUCCESS when there was nothing to test with. That is also why the post-pin rollback did not catch the bad pin — it used the same broken proof.
+
+**Fix (overlay).** `Usable()` requires a well-formed MAC and rejects all-zeros, broadcast and blocklisted values. The probe target is verified genuinely off-subnet against the host's own addresses and prefixes, preferring `init_gw_probe_targets` over DNS; the subnet comparison right-shifts both operands by the host-bit count rather than building a mask with `[uint32]0xFFFFFFFF -shl n`, which PowerShell widens to int64 and gets wrong. **If no off-subnet target exists the task does not pin at all** — an unpinned gateway is the status quo, a wrongly pinned one is an isolated host. A `Permanent` entry holding an unusable MAC is deleted at the start, so a host already damaged by the previous version heals on the next run.
+
+**Probe targets are range-specific.** Here: so-manager (172.16.9.30) is off-subnet for every Windows segment (172.16.2-6.x), and pp-syslog (172.16.2.9) covers the six hunt workstations that share 172.16.9.x with so-manager. Verified: all 45 Windows hosts have at least one off-subnet target without relying on the DNS fallback.
+
+---
+
 ## 2026-09-16 · bug · deploy.sh — a clean retry-scoped pass reported success over an unbuilt range
 
 **Symptom.** Attempt 1 failed, attempt 2 ran retry-scoped and passed, and deploy.sh exited 0 with `Success on attempt 2 (retry scope)`. The range had no domain joins and no Security Onion.
