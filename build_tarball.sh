@@ -2,12 +2,12 @@
 #
 # Build ab_pp.tgz for deployment.
 #
-# Auto-discovers roles referenced by arbitr_pp_playbook.yaml (and their meta
+# Auto-discovers roles referenced by every playbook under playbooks/ (and their meta
 # dependencies), then bundles:
 #   1. base roles from ../range-development-ansible/roles/
 #   2. custom roles from ./roles/ (override base if same name)
 #   3. files/ (pre-staged installers — refreshed from Nexus when reachable)
-#   4. host_vars/, group_vars/, hosts, arbitr_pp_playbook.yaml, deploy.sh
+#   4. host_vars/, group_vars/, hosts, site.yml, playbooks/, deploy.sh
 #
 # Before staging, Nexus is checked for any installer in NEXUS_FETCH below.
 # If the remote is reachable and differs from the local copy, the local file
@@ -22,7 +22,7 @@ set -euo pipefail
 
 SS_PP_AB="$(cd "$(dirname "$0")" && pwd)"
 SRC_BASE="$(cd "$SS_PP_AB/../range-development-ansible" && pwd)"
-PLAYBOOK="$SS_PP_AB/arbitr_pp_playbook.yaml"
+PLAYBOOK="$SS_PP_AB/playbooks/00-baseline.yml"
 ARCHIVE="$SS_PP_AB/ab_pp.tgz"
 STAGE_PARENT="$(mktemp -d)"
 STAGE="$STAGE_PARENT/abpp_build"
@@ -167,7 +167,7 @@ queue=()
 # deploy would fail on the controller with a missing-role error after the
 # tarball had already shipped. Silent at build time, which is the worst
 # place for it.
-PLAYBOOK_SCAN=("$PLAYBOOK")
+PLAYBOOK_SCAN=()
 if [ -d "$SS_PP_AB/playbooks" ]; then
   while IFS= read -r pb; do PLAYBOOK_SCAN+=("$pb"); done \
     < <(find "$SS_PP_AB/playbooks" -maxdepth 1 -name '*.yml' | sort)
@@ -231,7 +231,6 @@ cp -R "$SS_PP_AB/group_vars"              "$STAGE/"
 cp    "$SS_PP_AB/site.yml"               "$STAGE/"
 cp -R "$SS_PP_AB/playbooks"              "$STAGE/"
 cp    "$SS_PP_AB/hosts"                   "$STAGE/"
-cp    "$SS_PP_AB/arbitr_pp_playbook.yaml" "$STAGE/"
 cp    "$SS_PP_AB/deploy.sh"               "$STAGE/"
 cp    "$SS_PP_AB/ansible.cfg"            "$STAGE/"   # vault_password_file lives here
 # Detection rulesets that MUST ship inside the tarball. These ranges target
@@ -332,7 +331,7 @@ fi
 # --- Pack ------------------------------------------------------------------
 
 cd "$STAGE"
-TAR_PATHS=(roles host_vars group_vars hosts arbitr_pp_playbook.yaml site.yml playbooks deploy.sh ansible.cfg rules)
+TAR_PATHS=(roles host_vars group_vars hosts site.yml playbooks deploy.sh ansible.cfg rules)
 [ -d "collections" ] && TAR_PATHS+=(collections)
 [ -f "verify_deployment.sh" ] && TAR_PATHS+=(verify_deployment.sh)
 [ -f "requirements.yml" ] && TAR_PATHS+=(requirements.yml)

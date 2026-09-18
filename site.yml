@@ -6,10 +6,10 @@
 # Onion stack, ported from so-ansible where they were validated end to end
 # on a fresh range (2026-07-29/30).
 #
-# WHY arbitr_pp_playbook.yaml IS PHASE ZERO, AND WHY 00-setup.yml IS ABSENT
+# WHY playbooks/00-baseline.yml IS PHASE ZERO, AND WHY 00-setup.yml IS ABSENT
 # ------------------------------------------------------------------------
 # so-ansible's series opens with 00-setup.yml, which runs `init` + `common`
-# to baseline Windows and Linux hosts. arbitr_pp_playbook.yaml ALREADY does
+# to baseline Windows and Linux hosts. playbooks/00-baseline.yml ALREADY does
 # that for this whole range, including the five SO nodes (they are in
 # [ubuntu22] and [linux]). Importing both would run two NetworkManager /
 # netplan passes over the same hosts, and `common` reboots when netplan
@@ -26,7 +26,7 @@
 #           while it downloads. 40-manager blocks on the artifacts.
 #       Safe to hoist: the controller is in [ansible_controller] +
 #       [infrastructure] only -- never [linux] -- and
-#       arbitr_pp_playbook.yaml never targets it, so nothing the baseline
+#       playbooks/00-baseline.yml never targets it, so nothing the baseline
 #       does is a precondition for the mirror.
 #       Still must precede 30: so_base fetches the pinned SO source from it.
 #   20  the GRE tunnel + tc rules must exist before a sensor can receive
@@ -47,7 +47,7 @@
 # Mirror first — see ORDERING above. Starts the long download, then returns.
 - import_playbook: playbooks/10-mirror.yml
 
-- import_playbook: arbitr_pp_playbook.yaml
+- import_playbook: playbooks/00-baseline.yml
 
 # Windows clocks read the UTC RTC as local time, so every Windows host runs
 # hours fast. Harmless while everything is consistently wrong, fatal once a

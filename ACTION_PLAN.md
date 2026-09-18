@@ -37,7 +37,7 @@ Seven plays that exist in `range-development-ansible/playbook.yaml` but not yet 
 | B6 | `global_dns` | `[global_dns]` (`is-inet`) | External DNS simulation (containerized unbound) | Already have records in `all.yml` |
 | B7 | `trafficgen` | `[trafficgen]` (`is-inet`) | Generates background traffic to mimic realistic network | Same target as global_dns; works with the `inet` simulation infra |
 
-Each gets the same treatment: add play to `arbitr_pp_playbook.yaml`, populate any required `group_vars`, add inventory groups, run `build_tarball.sh`, test with `--tags <tag> --limit <host>` first, then full playbook run.
+Each gets the same treatment: add play to `playbooks/00-baseline.yml`, populate any required `group_vars`, add inventory groups, run `build_tarball.sh`, test with `--tags <tag> --limit <host>` first, then full playbook run.
 
 ---
 

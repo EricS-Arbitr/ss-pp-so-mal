@@ -3,7 +3,7 @@
 # verify_deployment.sh — read-only health check for PowerPlant range.
 # Run from the Ansible controller (/etc/ansible/).
 #
-# Walks every tier deployed by arbitr_pp_playbook.yaml and confirms
+# Walks every tier deployed by playbooks/00-baseline.yml and confirms
 # externally-visible state. Uses `ansible -m win_shell` / `vyos_command` /
 # `shell` and greps each command's stdout for an expected literal -- no
 # JSON parsing, no value extraction.

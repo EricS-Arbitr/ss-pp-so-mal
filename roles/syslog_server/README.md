@@ -22,7 +22,7 @@ This role does not currently expose tunables. If you need to change the listen p
 
 | Variable | Where | Description |
 |----------|-------|-------------|
-| syslog_server_ip | group_vars/all.yml | IP that clients forward to. The syslog client plays in `arbitr_pp_playbook.yaml` (Linux, VyOS, pfSense) reference this. The server itself binds to `*:514` so this var is informational on the server side. |
+| syslog_server_ip | group_vars/all.yml | IP that clients forward to. The syslog client plays in `playbooks/00-baseline.yml` (Linux, VyOS, pfSense) reference this. The server itself binds to `*:514` so this var is informational on the server side. |
 
 ## Prerequisites
 - The host runs Ubuntu (`apt`-managed). The Linux NM pre-config play and `common` role run before this one.

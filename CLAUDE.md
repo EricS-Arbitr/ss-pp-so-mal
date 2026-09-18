@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) and to human develop
 
 This directory (`ss-pp-ab/`) is a **range-specific Ansible overlay** for the **PowerPlant** cyber-range scenario (`voltgrid.com` domain) deployed on the **SimSpace NG** platform. It is NOT a standalone playbook — it layers on top of the customer's shared platform repo at `../range-development-ansible/`. See [range-development-ansible/CLAUDE.md](../range-development-ansible/CLAUDE.md) for the platform-level architecture.
 
-Two-sentence summary: `range-development-ansible` ships base roles and a reference playbook. `ss-pp-ab` ships range-specific inventory + host_vars + group_vars + custom roles + a range-specific playbook (`arbitr_pp_playbook.yaml`), bundles selected base roles + the custom overlays into a tarball (`build_tarball.sh` → `ab_pp.tgz`), and the tarball deploys to `/etc/ansible` on the range's Ansible host where `deploy.sh` runs the playbook.
+Two-sentence summary: `range-development-ansible` ships base roles and a reference playbook. `ss-pp-ab` ships range-specific inventory + host_vars + group_vars + custom roles + a range-specific playbook (`playbooks/00-baseline.yml`), bundles selected base roles + the custom overlays into a tarball (`build_tarball.sh` → `ab_pp.tgz`), and the tarball deploys to `/etc/ansible` on the range's Ansible host where `deploy.sh` runs the playbook.
 
 ## Repo layout (just this directory)
 
@@ -17,7 +17,7 @@ ss-pp-ab/
 ├── PROJECT_LOG.md               ← chronological build history (Apr–May 2026)
 ├── ACTION_PLAN.md               ← original phased plan (mostly done)
 ├── UPSTREAM_FIXES.md            ← ★ running log of customer-repo bugs/gaps + overlay workarounds
-├── arbitr_pp_playbook.yaml      ← the range's playbook (30+ plays)
+├── playbooks/00-baseline.yml      ← the range's playbook (30+ plays)
 ├── hosts                        ← inventory
 ├── group_vars/                  ← all.yml, linux.yml, windows.yml, pfsense.yml, vyos_routes_only.yml, voltgrid.yml, proxy.yml
 ├── host_vars/                   ← one yaml per managed host (51 files)
@@ -45,10 +45,10 @@ Custom roles currently in `roles/` (those not in the base repo, or that override
 
 ## Deploy structure (changed 2026-07-30)
 
-`site.yml` is now the entry point, not `arbitr_pp_playbook.yaml`:
+`site.yml` is now the entry point, not `playbooks/00-baseline.yml`:
 
 ```yaml
-- import_playbook: arbitr_pp_playbook.yaml   # phase 0 — the range baseline
+- import_playbook: playbooks/00-baseline.yml   # phase 0 — the range baseline
 - import_playbook: playbooks/10-mirror.yml   # SO source + airgap content mirror
 - import_playbook: playbooks/20-vyos.yml     # GRE tunnels + tc mirror rules
 - import_playbook: playbooks/30-prereqs.yml  # so_base on all SO nodes
@@ -59,7 +59,7 @@ Custom roles currently in `roles/` (those not in the base repo, or that override
 
 Ported from `so-ansible`, where the phases were validated end to end on a
 fresh range. **so-ansible's `00-setup.yml` is deliberately NOT imported** —
-`arbitr_pp_playbook.yaml` already runs `init` + `common` across this range,
+`playbooks/00-baseline.yml` already runs `init` + `common` across this range,
 including the five SO nodes, and running both would do two NetworkManager /
 netplan passes with a reboot each.
 
@@ -107,18 +107,18 @@ ansible-vault edit group_vars/all/vault.yml --vault-password-file .vault_pass
 ./build_tarball.sh                    # writes ab_pp.tgz
 
 # Inspect the playbook order
-grep '^- name:' arbitr_pp_playbook.yaml
+grep '^- name:' playbooks/00-baseline.yml
 
 # On the Ansible host (after copying ab_pp.tgz over and extracting to /etc/ansible)
 ./deploy.sh                           # runs ansible-playbook with 3-attempt retry
 
 # Direct playbook run (on the Ansible host)
-ansible-playbook arbitr_pp_playbook.yaml
-ansible-playbook arbitr_pp_playbook.yaml --tags pfsense       # tag-scoped slice
-ansible-playbook arbitr_pp_playbook.yaml --limit pp-ot-firewall
+ansible-playbook playbooks/00-baseline.yml
+ansible-playbook playbooks/00-baseline.yml --tags pfsense       # tag-scoped slice
+ansible-playbook playbooks/00-baseline.yml --limit pp-ot-firewall
 ```
 
-`build_tarball.sh` auto-discovers roles from `arbitr_pp_playbook.yaml`'s `roles:` blocks (plus meta dependencies), pulls each from `../range-development-ansible/roles/` first then overrides with the local `./roles/`. **Don't manually edit the role list in build_tarball.sh — add a role by referencing it in a play.**
+`build_tarball.sh` auto-discovers roles from `playbooks/00-baseline.yml`'s `roles:` blocks (plus meta dependencies), pulls each from `../range-development-ansible/roles/` first then overrides with the local `./roles/`. **Don't manually edit the role list in build_tarball.sh — add a role by referencing it in a play.**
 
 `verify_vars.py` runs at the end of `build_tarball.sh` and warns about Jinja `{{ var }}` references that don't resolve from any `group_vars`, `host_vars`, or `role/defaults`. The three current "expected" warnings are `billing_secret_key`, `pfsense_stale_gateways` and `unlisted` (updated 2026-08-04). The first two have `| default(...)` filters and are intentional; `unlisted` is a false positive — a task-level `vars:` entry in `playbooks/75-endpoint.yml`, which verify_vars.py does not parse.
 
@@ -202,7 +202,7 @@ Hosts belong to multiple overlapping groups. Group meanings:
 1. `group_vars/all.yml` — credentials, proxy, syslog server IP.
 2. `group_vars/<group>.yml` — `linux.yml`, `windows.yml`, `pfsense.yml`, `vyos_routes_only.yml`, `voltgrid.yml`, `proxy.yml`.
 3. `host_vars/<host>.yml` — per-host IPs/interfaces/role-specific tuning.
-4. Inline play vars in `arbitr_pp_playbook.yaml`.
+4. Inline play vars in `playbooks/00-baseline.yml`.
 
 Notable shared variables (defined in `group_vars/all.yml`):
 - `inet_proxy_addr` / `inet_proxy_port` — corporate proxy (10.255.240.1:3128) for any `apt`/`pip`/`win_get_url` traffic.
@@ -210,7 +210,7 @@ Notable shared variables (defined in `group_vars/all.yml`):
 
 ## Conventions specific to this overlay
 
-1. **Customer-role workarounds live as plays, not role forks.** If a base role has a bug or gap, the preferred fix is an additional play in `arbitr_pp_playbook.yaml` that compensates after the base role runs. Only fork a role into `roles/<name>/` when the workaround can't be expressed as additional tasks (e.g., `syslog_server`, which had no base role at all).
+1. **Customer-role workarounds live as plays, not role forks.** If a base role has a bug or gap, the preferred fix is an additional play in `playbooks/00-baseline.yml` that compensates after the base role runs. Only fork a role into `roles/<name>/` when the workaround can't be expressed as additional tasks (e.g., `syslog_server`, which had no base role at all).
 
 2. **Every overlay workaround → an UPSTREAM_FIXES.md entry, same turn it lands.** Per `~/.claude/projects/-Users-eric-starace-vCity/memory/feedback_upstream_fixes_log.md`. Standard format: `## YYYY-MM-DD · <severity> · <target path / heading>`, severity = `bug` / `gap` / `enhancement` / `platform`. Each entry has Symptom → Detection (if non-obvious) → Fix (upstream) → Workaround (overlay).
 
@@ -310,7 +310,7 @@ A few things that will save the next session time:
 
 4. **Customer repo (`../range-development-ansible/`) has its own CLAUDE.md.** Treat that as the platform-level reference; treat this file as the range-level reference. Edits to base roles live in the customer repo; edits to range vars / plays live here.
 
-5. **Don't touch base roles directly to fix bugs.** Add an overlay role with the same name (build_tarball.sh prefers `./roles/<name>` over `../range-development-ansible/roles/<name>`), OR add a compensating play in `arbitr_pp_playbook.yaml`. Either way, log an UPSTREAM_FIXES.md entry naming the original file and proposing the upstream fix.
+5. **Don't touch base roles directly to fix bugs.** Add an overlay role with the same name (build_tarball.sh prefers `./roles/<name>` over `../range-development-ansible/roles/<name>`), OR add a compensating play in `playbooks/00-baseline.yml`. Either way, log an UPSTREAM_FIXES.md entry naming the original file and proposing the upstream fix.
 
 6. **For routing changes**: always confirm the FIB matches the configured intent (`show ip route` on VyOS, `netstat -rn` or `vtysh -c "show ip route"` on pfSense). "The config has the line" is not the same as "the kernel installed the route." Multiple equal-cost statics, image-baked junk routes, and self-loop next-hops all cause FRR to silently drop routes from the FIB.
 
@@ -322,7 +322,7 @@ A few things that will save the next session time:
 
 ```
 /etc/ansible/                          ← extracted tarball lives here
-/etc/ansible/arbitr_pp_playbook.yaml
+/etc/ansible/playbooks/00-baseline.yml
 /etc/ansible/hosts
 /etc/ansible/{host_vars,group_vars,roles}/
 /etc/ansible/deploy.sh

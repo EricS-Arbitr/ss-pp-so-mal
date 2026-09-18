@@ -15,7 +15,7 @@ A working Ansible overlay (`ss-pp-ab`) that provisions the **voltgrid.com** Powe
 - 24 Windows workstations + corp servers domain-joined and configured for AE/AUE simulation postures
 - Splunk + hunt subnet (`pp-splunk`, `win-hunt-1`)
 
-51 host_vars, 5 group_vars, 18 plays in `arbitr_pp_playbook.yaml`, 29 roles bundled (26 base + 3 custom).
+51 host_vars, 5 group_vars, 18 plays in `playbooks/00-baseline.yml`, 29 roles bundled (26 base + 3 custom).
 
 ## Phases
 
@@ -113,5 +113,5 @@ Cleanup in `ss-pp-ab`:
 - Path: `ss-pp-ab/ab_pp.tgz`
 - Built by: `ss-pp-ab/build_tarball.sh`
 - Latest size: ~185K
-- Contents: 51 host_vars, 5 group_vars, 29 roles, hosts, arbitr_pp_playbook.yaml, deploy.sh
+- Contents: 51 host_vars, 5 group_vars, 29 roles, hosts, playbooks/00-baseline.yml, deploy.sh
 - Excluded by design: `UPSTREAM_FIXES.md`, `PROJECT_LOG.md` (local docs)

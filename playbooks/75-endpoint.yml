@@ -18,7 +18,7 @@
 # =========================================================================
 
 # --- Sysmon ---------------------------------------------------------------
-# Sysmon was already deployed by arbitr_pp_playbook.yaml, but ONLY in the
+# Sysmon was already deployed by playbooks/00-baseline.yml, but ONLY in the
 # "apply AUE settings" play, so it reached the [aue] workstations and nothing
 # else. The DCs and corporate servers -- pp-dc01/02/03, pp-file, pp-sql,
 # pp-mail -- had none, which is precisely where process ancestry matters most

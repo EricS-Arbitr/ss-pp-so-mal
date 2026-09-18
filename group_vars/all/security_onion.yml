@@ -321,7 +321,7 @@ so_fleet_host: "{{ hostvars[groups['so_manager'][0]]['so_prod_ip'] }}"
 # Port the Elastic pfSense integration listens on, on so-manager. Package
 # default is 9001; the three firewalls are configured to send here as their
 # SECOND syslog destination (pp-syslog remains the first). See the pfSense
-# syslog client play in arbitr_pp_playbook.yaml.
+# syslog client play in playbooks/00-baseline.yml.
 so_pfsense_syslog_port: 9001
 
 # NO VyOS PORT. Confirmed against the airgapped package registry 2026-09-10:

@@ -1764,7 +1764,7 @@ and minus the SO grid, which enrolls itself. 8 subnets. Additive to Splunk —
 nothing is removed from the existing forwarder path.
 
 **What the range already had, which shaped the design.**
-- *Sysmon was already deployed, but only on `[aue]`.* `arbitr_pp_playbook.yaml`
+- *Sysmon was already deployed, but only on `[aue]`.* `playbooks/00-baseline.yml`
   installs it in the "apply AUE settings" play, so the workstations had it and
   pp-dc01/02/03, pp-file, pp-sql, pp-mail had none — exactly where process
   ancestry matters most. The role is idempotent (`creates_service: Sysmon64`),
@@ -1838,7 +1838,7 @@ flow with an `expires_at` and compares it against the BROWSER's clock. Flows
 live 60 minutes, so a client ~4h fast sees every fresh flow as ~3h expired.
 
 **Why it came back.** The fix lived in so-ansible's `playbooks/00-setup.yml`,
-which ss-pp-ab deliberately does NOT import — `arbitr_pp_playbook.yaml`
+which ss-pp-ab deliberately does NOT import — `playbooks/00-baseline.yml`
 already runs `init` + `common`, and importing both would do two
 NetworkManager/netplan passes with a reboot each. That decision was correct
 for its own reasons, but it silently dropped an unrelated fix riding in the
@@ -2288,7 +2288,7 @@ All 3 deploy.sh attempts fail identically before any host actually joins.
 
 **Root cause.** `domain_member_retry/tasks/main.yml:22` uses `ansible.builtin.pause` to wait for the post-join NIC flap to settle. Ansible's `free` strategy explicitly rejects `pause` because pause is a per-play blocker, not per-host — under free, it would either block all hosts (defeating the point) or fire N times per host (nonsense). Ansible chose to hard-fail the play rather than pick either behavior.
 
-**Fix (overlay).** Reverted `strategy: free` on just the Join Domain play in `arbitr_pp_playbook.yaml`. The other 5 plays that got `strategy: free` (strip_apipa, root_certs, network_discovery, AUE bundle, AE bundle) keep the speedup — none of them use `pause`.
+**Fix (overlay).** Reverted `strategy: free` on just the Join Domain play in `playbooks/00-baseline.yml`. The other 5 plays that got `strategy: free` (strip_apipa, root_certs, network_discovery, AUE bundle, AE bundle) keep the speedup — none of them use `pause`.
 
 **Fix (upstream).** In `domain_member_retry/tasks/main.yml`, replace `pause: seconds: N` with a delegated `wait_for` on the local Ansible controller, e.g.:
 ```yaml
@@ -2715,7 +2715,7 @@ All Windows hosts in PowerPlant use `managementInterface.position: FIRST`, so mg
 1. **Skip if all canonical names already exist among the adapters.** A host whose `Get-NetAdapter | Select Name` includes every `EthernetN` for `N in 0..count-1` is already correctly named — don't touch it.
 2. **When a rename is needed, do a two-pass swap through temp names** (`_temp_0`, `_temp_1`, ...). Otherwise the first rename can collide with an existing target name and the role aborts mid-loop, leaving the host in a broken half-renamed state.
 
-PowerPlant's pre-play in `arbitr_pp_playbook.yaml` implements both rails.
+PowerPlant's pre-play in `playbooks/00-baseline.yml` implements both rails.
 
 ---
 
@@ -2808,7 +2808,7 @@ Symptom in PowerPlant after deploy: `nslookup www.voltgrid.com` resolves, `nsloo
 ```
 Range authors then declare `dns_forwarders: ['200.200.200.2']` (or whatever the simulated-internet DNS IP is) in group_vars. Disabling root hints is important in sealed ranges — otherwise queries that miss the forwarder fall back to root hints and consume the full `forwarder_timeout` window before failing.
 
-PowerPlant overlay adds a one-task play after the `dns` play in `arbitr_pp_playbook.yaml` that runs against `domain_controllers` (covers both the primary DC and any additional DCs — forwarder config is per-DC, not replicated via AD).
+PowerPlant overlay adds a one-task play after the `dns` play in `playbooks/00-baseline.yml` that runs against `domain_controllers` (covers both the primary DC and any additional DCs — forwarder config is per-DC, not replicated via AD).
 
 ---
 
@@ -2827,7 +2827,7 @@ Same "Disable control net DNS registration" task (lines 51–57) has a **second*
 ```
 (Or hardcode `Ethernet0` if mgmt is always the first adapter in the SimSpace pattern.)
 
-**Workaround in PowerPlant overlay:** added two plays to `arbitr_pp_playbook.yaml` after the `dc_status` play (tag `strip_mgmt_dns`). First disables DDNS on Ethernet0 across all Windows hosts and re-registers; second runs against the PDC to delete any A record in voltgrid.com whose IPv4 falls in 10.255.240.0/20, and any PTR record in the matching reverse zones. Idempotent.
+**Workaround in PowerPlant overlay:** added two plays to `playbooks/00-baseline.yml` after the `dc_status` play (tag `strip_mgmt_dns`). First disables DDNS on Ethernet0 across all Windows hosts and re-registers; second runs against the PDC to delete any A record in voltgrid.com whose IPv4 falls in 10.255.240.0/20, and any PTR record in the matching reverse zones. Idempotent.
 
 ---
 
@@ -2841,7 +2841,7 @@ The SimSpace VyOS 1.5-rolling image bakes one stale `set protocols static route 
 
 **Fix (upstream)**: SimSpace should strip the post-provision script (or template config) that injects per-interface default routes. Routers should ship with no static defaults; the Ansible role's `static_route` is authoritative.
 
-**Workaround in PowerPlant overlay**: added a new play to `arbitr_pp_playbook.yaml` ("Remove stale VyOS static routes", tag `extra_static_routes_remove`) that iterates a per-host `extra_static_routes_remove: [{network, next_hop}]` list and issues `delete protocols static route <n> next-hop <nh>` via `vyos_config`. Each affected host_vars file declares the IPs to strip; the play runs idempotently after the `Additional VyOS static routes` play, so the only surviving default is whatever the customer `vyos` role set from `static_route`.
+**Workaround in PowerPlant overlay**: added a new play to `playbooks/00-baseline.yml` ("Remove stale VyOS static routes", tag `extra_static_routes_remove`) that iterates a per-host `extra_static_routes_remove: [{network, next_hop}]` list and issues `delete protocols static route <n> next-hop <nh>` via `vyos_config`. Each affected host_vars file declares the IPs to strip; the play runs idempotently after the `Additional VyOS static routes` play, so the only surviving default is whatever the customer `vyos` role set from `static_route`.
 
 ---
 
@@ -2876,7 +2876,7 @@ Once a range has a collector, every device needs a small bit of config to forwar
 - **`roles/common/tasks/linux.yml`** has no task that drops an `/etc/rsyslog.d/*-forward.conf` snippet.
 - **`roles/vyos/tasks/main.yml`** has no task that pushes `set system syslog host <ip> facility all level info`.
 
-PowerPlant handles all of this in three inline plays in `arbitr_pp_playbook.yaml` (tag `syslog_client`) gated by a single new variable `syslog_server_ip` in `group_vars/all.yml`. Linux clients get a one-line UDP forwarder, VyOS clients get the `set system syslog host` line via `vyos_config`, and pfSense clients get a `php -r` task that writes the `<syslog>` block in `config.xml`. Hosts that shouldn't forward (e.g., `pp-isp-router`, which represents the ISP rather than corp gear) are excluded via host pattern (`vyos:vyos_routes_only:!pp-isp-router`).
+PowerPlant handles all of this in three inline plays in `playbooks/00-baseline.yml` (tag `syslog_client`) gated by a single new variable `syslog_server_ip` in `group_vars/all.yml`. Linux clients get a one-line UDP forwarder, VyOS clients get the `set system syslog host` line via `vyos_config`, and pfSense clients get a `php -r` task that writes the `<syslog>` block in `config.xml`. Hosts that shouldn't forward (e.g., `pp-isp-router`, which represents the ISP rather than corp gear) are excluded via host pattern (`vyos:vyos_routes_only:!pp-isp-router`).
 
 **Fix (upstream)**:
 1. In `roles/common/tasks/linux.yml`, drop an rsyslog forwarder snippet whenever `syslog_server_ip` is defined, with a notified handler to restart rsyslog. ~10 lines.

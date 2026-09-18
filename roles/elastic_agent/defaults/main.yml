@@ -6,7 +6,7 @@
 # fetch over the mgmt plane, exactly as they already fetch Chrome and Sysmon
 # from the in-platform Nexus.
 # so_fleet_host MOVED to group_vars/all/security_onion.yml 2026-09-10 -- the
-# pfSense syslog play in arbitr_pp_playbook.yaml references it without
+# pfSense syslog play in playbooks/00-baseline.yml references it without
 # including this role, and role defaults are role-scoped. verify_vars.py
 # caught it at build time. One source of truth; do not redefine here.
 

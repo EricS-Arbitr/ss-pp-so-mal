@@ -319,7 +319,7 @@
         group: root
         mode: '0644'
         content: |
-          # Managed by Ansible (arbitr_pp_playbook.yaml). Range-wide IPv6
+          # Managed by Ansible (playbooks/00-baseline.yml). Range-wide IPv6
           # disable -- no IPv6 anywhere on any Linux host in this range.
           net.ipv6.conf.all.disable_ipv6 = 1
           net.ipv6.conf.default.disable_ipv6 = 1
@@ -935,7 +935,7 @@
         mode: '0644'
         content: |
           # Forward all logs to central syslog collector (pp-syslog).
-          # Managed by Ansible (arbitr_pp_playbook.yaml). UDP — accepted on
+          # Managed by Ansible (playbooks/00-baseline.yml). UDP — accepted on
           # both UDP and TCP by the server; UDP avoids the queue-up failure
           # mode if pp-syslog is briefly unreachable.
           *.* @{{ syslog_server_ip }}:514

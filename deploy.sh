@@ -13,11 +13,11 @@
 # comfortable middle ground and matches the airfield-range deploy.sh.
 
 # site.yml is a WRAPPER, not a play in its own right. It imports
-# arbitr_pp_playbook.yaml (the range baseline, phase 0) and then the nine
+# playbooks/00-baseline.yml (the range baseline, phase 0) and then the nine
 # Security Onion phases: 05-time, 10-mirror, 20-vyos, 30-prereqs,
 # 40-manager, 50-nodes, 60-verify, 70-analyst, 75-endpoint.
 #
-# Setting this to arbitr_pp_playbook.yaml would still run and still report
+# Setting this to playbooks/00-baseline.yml would still run and still report
 # success -- while silently skipping every SO phase, including the mirror
 # the SO nodes fetch their source and container images from. Keep it
 # pointed at the wrapper.
