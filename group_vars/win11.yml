@@ -26,5 +26,5 @@
 # vault variable fails loudly on the first task; a defaulted one would supply
 # a wrong password and reproduce exactly the 900s silent hang described above.
 ansible_user: xadmin
-ansible_password: "{{ vault_win_workstation_password }}"
+ansible_password: "{{ vault_windows_xadmin_password }}"
 ansible_become_user: xadmin

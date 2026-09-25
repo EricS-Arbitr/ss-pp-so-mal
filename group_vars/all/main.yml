@@ -109,10 +109,15 @@ global_dns_records:
     value: "mail.outlook.com"
     zone: "outlook.com"
 
-# Windows 10/11 workstation local account (xadmin), used by group_vars/win10.yml
-# and group_vars/win11.yml. The 2026-08-26 image refresh changed the account
-# the workstation images ship; the server images still use simspace /
-# vault_domain-era credentials from vault.yml.
+# The xadmin local account password for the refreshed SimSpace Windows images,
+# used by group_vars/win10.yml and win11.yml.
+#
+# IMAGE VERSION IS THE AXIS, not workstation-versus-server. 1.2.x ships
+# `xadmin` with this password; 1.1.0 still ships `simspace` with
+# vault_windows_password from vault.yml, which is why every server in this range
+# stays on group_vars/windows.yml. Named for the account rather than the tier
+# because in ss-pp-so this same secret also serves
+# RDP_Windows_Server_2022:1.2.5 -- one refreshed-image password, one variable.
 #
 # INLINE-VAULTED HERE rather than added to vault.yml, deliberately. It was
 # produced with `ansible-vault encrypt_string`, which emits a single encrypted
@@ -124,7 +129,7 @@ global_dns_records:
 #
 # If you later consolidate this into vault.yml, delete it from here in the same
 # commit. Two definitions of one variable is a silent precedence puzzle.
-vault_win_workstation_password: !vault |
+vault_windows_xadmin_password: !vault |
           $ANSIBLE_VAULT;1.1;AES256
           61303261393531363463373439653439386633623835633639353661623331333833343437343733
           3234393962656633333337346162393637613239633462300a313131366562626535653331303663
